@@ -15,6 +15,7 @@
     "deploy:fuji": "forge script script/DeployTokenSale.s.sol:DeployTokenSale --private-key $DEPLOYER_KEY --broadcast --verify --rpc-url $AVALANCHE_FUJI_RPC --etherscan-api-key $ETHERSCAN_API_KEY --verifier-url $AVALANCHE_FUJI_VERIFIER_URL --sender $DEPLOYER",
     "deploy:sepolia": "forge script script/DeployTokenSale.s.sol:DeployTokenSale --private-key $DEPLOYER_KEY --broadcast --verify --rpc-url $ETH_SEPOLIA_RPC --etherscan-api-key $ETHERSCAN_API_KEY --sender $DEPLOYER",
     "deploy:local": "forge script script/DeployTokenSale.s.sol:DeployTokenSale --private-key 0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80 --broadcast --rpc-url http://localhost:8545 --sender 0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+    "deploy:nodejs": "node deploy-nodejs.js",
     "anvil": "anvil",
     "anvil:fork": "anvil --fork-url $MAINNET_RPC",
     "slither": "slither .",
@@ -38,6 +39,11 @@
   ],
   "author": "",
   "license": "MIT",
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "ethers": "^6.13.0",
+    "solc": "0.8.27"
+  },
   "devDependencies": {
     "@types/node": "^20.0.0"
   }
