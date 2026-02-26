@@ -7,6 +7,7 @@
     "setup": "forge install OpenZeppelin/openzeppelin-contracts-upgradeable OpenZeppelin/openzeppelin-foundry-upgrades OpenZeppelin/openzeppelin-contracts",
     "build": "forge build",
     "test": "forge clean && forge build && forge test",
+    "test:oraclefeeds": "forge test --match-path test/SepoliaOracleFeeds.t.sol -vv",
     "test:fast": "forge test",
     "test:gas": "forge test --gas-report --optimizer-runs 10000",
     "test:verbose": "forge test -vv",
