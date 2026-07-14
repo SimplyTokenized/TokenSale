@@ -200,6 +200,25 @@ baseTokens = (paymentAmount * rate) / (10^paymentTokenDecimals)
 
 In oracle mode the rate is derived instead: `rate = baseRate * paymentTokenPrice / basePaymentTokenPrice`, with both prices normalized to 18 decimals.
 
+## How Oracle Pricing Works (in plain terms)
+
+If you want live pricing, you pick **one currency to price your sale in** — this is the *base payment token*. For example: "1 sold token always costs 1 EUR." Everything else is converted into that base automatically using Chainlink price feeds.
+
+Think of it like a shop that prices everything in euros but accepts other currencies at the till. To convert a payment into euros, the till needs to know two exchange rates — the currency being paid **and** the euro — both measured against the same yardstick.
+
+**The one rule you must follow: every price feed must be quoted against the same currency — normally USD.**
+
+- Selling priced in EUR, accepting USDC and ETH → use `EUR/USD`, `USDC/USD`, and `ETH/USD`.
+- You always use the **standard feeds** — you never need a "reversed" feed. Whether EUR is the base or USDC is the base, you register the same `EUR/USD` and `USDC/USD` feeds. The contract figures out the direction on its own (it just divides one by the other).
+- One feed is needed **per token**: one for the base + one for each other token you price live. A sale in EURC + USDC + ETH needs three feeds.
+- Paying in the base token itself is always exact (1 EUR → 1 token) and uses no feed.
+
+**Example.** Base = EUR (1 token = 1 EUR). If `ETH/USD = 3000` and `EUR/USD = 1.10`, then 1 ETH is worth `3000 / 1.10 ≈ 2727` EUR, so paying 1 ETH mints ~2727 tokens — computed automatically, no manual rate needed.
+
+> **Do not mix quote currencies.** Pairing a `USDC/USD` feed with a `EUR/GBP` feed produces a silently wrong price — the contract trusts your feed configuration and cannot detect the mismatch. Always double-check every feed is `.../USD` (or all `.../ETH`), and verify your setup with `calculateTokens` before going live. For extra safety, set `setOraclePriceBounds` so an obviously wrong price reverts instead of executing.
+
+If a feed is stale, returns a bad value, or (on L2s) the sequencer is down, the purchase **reverts** rather than using an outdated price — see [Security Considerations](#%EF%B8%8F-security-considerations).
+
 ## 🔄 Upgradeability
 
 The contract uses OpenZeppelin's transparent proxy pattern:
