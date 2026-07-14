@@ -1,246 +1,253 @@
 # Token Sale Contract
 
-An upgradeable token sale contract where users can purchase newly minted base tokens by paying with specified tokens (or ETH). Features optional whitelisting, configurable payment tokens, and flexible rate management.
+An upgradeable token sale contract where users purchase newly minted base tokens by paying with approved ERC20 tokens or ETH. Supports fixed rates, Chainlink-oracle-derived rates, optional whitelisting, per-user and global sale limits, and time-boxed sale windows.
 
 ## ✨ Features
 
-- ✅ **Proxy Contract Support** - Fully upgradeable using OpenZeppelin's transparent proxy pattern
-- 💰 **Multiple Payment Tokens** - Support for any ERC20 token or ETH as payment
-- 📋 **Optional Whitelisting** - Enable/disable whitelist requirement for purchases
-- 🪙 **Configurable Rates** - Define exchange rates for each payment token
-- 📊 **Purchase Statistics** - Track purchases per user and per payment token
-- ⏸️ **Pausable** - Admin can pause/unpause sales
-- 🔒 **Access Control** - Role-based access control for admin functions
-- 🛡️ **Reentrancy Protection** - Protected against reentrancy attacks
-- 💸 **Payment Forwarding** - Payments are automatically forwarded to a designated recipient
+- **Upgradeable** — OpenZeppelin transparent proxy pattern
+- **Multiple Payment Tokens** — any approved ERC20 token or native ETH
+- **Fixed or Oracle Pricing** — manual rates per token, or rates derived from Chainlink price feeds relative to a configurable base payment token
+- **Oracle Hardening** — per-feed staleness thresholds, optional price bounds, optional L2 sequencer uptime check; fail-closed on any oracle error
+- **Slippage Protection** — buyers specify the minimum tokens they accept
+- **Sale Limits** — hard cap, minimum purchase, per-user limits (global and per-address overrides), start/end time window
+- **Optional Whitelisting** — restrict purchases to approved addresses
+- **Order IDs** — optional per-buyer order identifiers for off-chain reconciliation
+- **Purchase Statistics** — totals per user, per payment token, and per sale
+- **Pausable** — admin can halt sales in an emergency
+- **Role-Based Access Control** — separate admin and whitelist-manager roles
+- **Payment Forwarding** — payments go directly to a designated recipient; the contract holds no funds
+
+## 📋 Requirements
+
+- [Foundry](https://book.getfoundry.sh/getting-started/installation)
+- Node.js ≥ 18 (for the optional Node.js deployment path and the upgrade-safety validator)
+- A deployment target that supports the **Cancun** hardfork (EIP-1153 transient storage) — Ethereum mainnet, Sepolia, and current Arbitrum/Optimism/Base releases all qualify
 
 ## 🚀 Quick Start
 
-### Prerequisites
+### Install
 
-1. Install dependencies:
 ```bash
-npm run install:deps
-# Or manually:
-forge install OpenZeppelin/openzeppelin-contracts-upgradeable OpenZeppelin/openzeppelin-foundry-upgrades OpenZeppelin/openzeppelin-contracts
+npm install          # Node.js tooling (ethers, solc, dotenv)
+npm run install:deps # Foundry libraries (OpenZeppelin, Chainlink)
 ```
 
-2. Set up environment variables in `.env`:
+### Configure
+
 ```bash
-BASE_TOKEN=<address_of_base_token>  # The ERC20 token being sold (must have MINTER_ROLE)
-PAYMENT_RECIPIENT=<address_to_receive_payments>
-ADMIN=<admin_address>
+cp .env.example .env
+# then fill in BASE_TOKEN, PAYMENT_RECIPIENT, ADMIN, and network settings
 ```
 
-### Build
+### Build & Test
 
 ```bash
 npm run build
-```
 
-### Test
-
-```bash
-# Run all tests
-npm run test
-
-# Run with gas report
-npm run test:gas
-
-# Run with verbose output
-npm run test:verbose
+npm run test          # full unit suite (deterministic, no network access)
+npm run test:all      # includes the Sepolia live-oracle fork tests
+npm run test:gas      # with gas report
 ```
 
 ### Deploy
 
 ```bash
-# Local deployment
-npm run deploy:local
-
-# Testnet deployment
-npm run deploy:testnet
+npm run deploy:local    # local Anvil node
+npm run deploy:sepolia  # Ethereum Sepolia (verifies on Etherscan)
+npm run deploy:nodejs   # Node.js/ethers deployment path (see DEPLOY_NODEJS.md)
 ```
 
 ## 📖 Contract Functions
 
-### Admin Functions
-
-#### Payment Token Management
-- `addPaymentToken(address paymentToken, uint256 tokensPerPayment, uint8 paymentTokenDecimals)` - Add a payment token with its rate
-- `removePaymentToken(address paymentToken)` - Remove a payment token
-- `updatePaymentTokenRate(address paymentToken, uint256 newRate)` - Update the rate for a payment token
-
-#### Whitelist Management
-- `addToWhitelist(address account)` - Add address to whitelist
-- `removeFromWhitelist(address account)` - Remove address from whitelist
-- `updateWhitelistRequirement(bool requireWhitelist)` - Enable/disable whitelist requirement
-
-#### Configuration
-- `updatePaymentRecipient(address paymentRecipient)` - Update payment recipient address
-- `pause()` - Pause token sales
-- `unpause()` - Unpause token sales
-
 ### Purchase Functions
 
-- `purchaseWithToken(address paymentToken, uint256 paymentAmount, uint256 minTokensOut, bytes32 orderId)` - Purchase tokens with ERC20 payment token
-- `purchaseWithETH(uint256 minTokensOut, bytes32 orderId)` - Purchase tokens with ETH (payable function)
+- `purchaseWithToken(address paymentToken, uint256 paymentAmount, uint256 minTokensOut, bytes32 orderId)` — purchase with an approved ERC20 token
+- `purchaseWithETH(uint256 minTokensOut, bytes32 orderId)` — purchase with ETH (payable)
 
-`minTokensOut` is slippage protection: the transaction reverts if the rate changed and the buyer would receive fewer tokens than specified (use the value from `calculateTokens`, or 0 to accept any rate). `orderId` is an optional identifier, unique per buyer (`bytes32(0)` = none).
+`minTokensOut` is slippage protection: the transaction reverts if the rate changed and the buyer would receive fewer tokens than specified. Use the value from `calculateTokens`, or `0` to accept any rate. `orderId` is an optional identifier, unique per buyer (`bytes32(0)` = none).
 
 ### View Functions
 
-- `calculateTokens(address paymentToken, uint256 paymentAmount)` - Calculate tokens for a payment amount
-- `getUserPurchases(address user)` - Get total tokens purchased by a user
-- `getUserPurchasesByToken(address user, address paymentToken)` - Get tokens purchased using a specific payment token
-- `paymentTokenRates(address)` - Get rate for a payment token
-- `paymentTokenDecimals(address)` - Get decimals for a payment token
-- `allowedPaymentTokens(address)` - Check if payment token is allowed
+- `calculateTokens(address paymentToken, uint256 paymentAmount)` — quote the base tokens for a payment amount (reverts if oracle data is unavailable — fail-closed)
+- `getUserPurchases(address user)` / `totalPurchased(address)` — total base tokens a user purchased through the sale
+- `getUserPurchasesByToken(address user, address paymentToken)` — purchases per payment token
+- `totalSales()`, `revenueByToken(address)` — sale-wide statistics
+- `paymentTokenRates(address)`, `paymentTokenDecimals(address)`, `allowedPaymentTokens(address)` — payment token configuration
+- `usedOrderIds(address buyer, bytes32 orderId)` — whether a buyer has used an order ID
+
+### Admin Functions
+
+#### Payment Token Management
+- `addPaymentToken(address paymentToken, uint256 tokensPerPayment, uint8 paymentTokenDecimals)` — add a payment token (decimals are verified against the token contract when available; ETH must be added with 18 decimals)
+- `removePaymentToken(address paymentToken)` — remove a payment token and **all** of its configuration (rate, decimals, oracle settings, price bounds); the active base payment token cannot be removed
+- `updatePaymentTokenRate(address paymentToken, uint256 newRate)` — update a manual rate
+
+#### Base Rate & Oracle Pricing
+- `setBaseRate(address basePaymentToken, uint256 baseRate)` — set the anchor: how many base tokens one unit of the base payment token buys
+- `updateBaseRate(uint256 newBaseRate)` / `updateBasePaymentToken(address newBasePaymentToken)`
+- `configureOracle(address paymentToken, address oracle, uint256 stalenessThreshold)` — attach a Chainlink feed to a payment token and enable oracle mode; set the threshold to the feed's heartbeat
+- `setOracleMode(address paymentToken, bool useOracle)` — switch between oracle and manual pricing
+- `removeOracle(address paymentToken)` — remove the oracle configuration (clears threshold and bounds)
+- `updateStalenessThreshold(address paymentToken, uint256 newThreshold)` / `updateDefaultStalenessThreshold(uint256 newThreshold)`
+- `setOraclePriceBounds(address paymentToken, uint256 minPrice, uint256 maxPrice)` — optional sanity bounds (in feed decimals) against a pinned Chainlink circuit breaker
+- `setSequencerUptimeFeed(address feed, uint256 gracePeriod)` — L2 sequencer uptime check; **required on L2 deployments**, `address(0)` disables it for L1
+
+#### Sale Limits
+- `configureSale(uint256 hardCap, uint256 minPurchaseAmount, uint256 maxPurchasePerUser, uint256 saleStartTime, uint256 saleEndTime)` — configure everything at once (0 = no restriction)
+- `setHardCap`, `setMinPurchaseAmount`, `setMaxPurchasePerUser`, `setMaxPurchaseForUser(address user, uint256 max)`, `setSaleTimeWindow`
+
+#### Whitelist & Operations
+- `addToWhitelist(address)` / `removeFromWhitelist(address)` — requires `ADMIN_ROLE` or `WHITELIST_ROLE`
+- `updateWhitelistRequirement(bool)` — enable/disable the whitelist requirement
+- `updatePaymentRecipient(address)` — change where payments are forwarded
+- `pause()` / `unpause()` — halt/resume purchases
+- `emergencyWithdraw(address token, address recipient, uint256 amount)` — recover ETH/tokens accidentally sent to the contract (the contract holds no funds during normal operation)
 
 ## 🔐 Roles
 
 | Role | Description |
 |------|-------------|
-| `DEFAULT_ADMIN_ROLE` | Full admin access, can upgrade contract |
-| `ADMIN_ROLE` | Can manage payment tokens, whitelist, and configuration |
+| `DEFAULT_ADMIN_ROLE` | Can grant/revoke all roles |
+| `ADMIN_ROLE` | Manages payment tokens, rates, oracles, limits, whitelist, pausing, and withdrawals |
+| `WHITELIST_ROLE` | Can add/remove whitelist entries only |
+| ProxyAdmin owner | Can upgrade the implementation (set at deployment, outside AccessControl) |
+
+> **Production requirement:** hold the admin and ProxyAdmin-owner keys in a multisig, ideally behind a timelock. See [Security Considerations](#%EF%B8%8F-security-considerations).
 
 ## 📝 Setup Process
 
-### 1. Deploy Contract
+### 1. Deploy
 
-Deploy the TokenSale contract using the deployment script.
+Deploy via the Foundry script (`script/DeployTokenSale.s.sol`) or the Node.js path ([DEPLOY_NODEJS.md](./DEPLOY_NODEJS.md)). Both deploy the implementation and a transparent proxy, and initialize atomically.
 
 ### 2. Grant MINTER_ROLE
 
-The TokenSale contract must have `MINTER_ROLE` on the base token (ERC20 contract) to mint tokens directly:
+The TokenSale proxy must be able to mint the base token:
 
 ```solidity
-// On the base token contract (from ERC20 folder)
 bytes32 MINTER_ROLE = keccak256("MINTER_ROLE");
-baseToken.grantRole(MINTER_ROLE, tokenSaleAddress);
+baseToken.grantRole(MINTER_ROLE, tokenSaleProxyAddress);
 ```
-
-Once granted, the TokenSale contract can directly call `mint(address, uint256)` on the base token contract, which will automatically check for MINTER_ROLE.
 
 ### 3. Add Payment Tokens
 
-Configure payment tokens with their rates:
-
 ```solidity
-// Example: 1 USDC (6 decimals) = 100 BASE tokens (18 decimals)
-// Rate = 100 * 10^18
+// 1 USDC (6 decimals) = 100 BASE tokens (18 decimals)
 tokenSale.addPaymentToken(usdcAddress, 100 * 10**18, 6);
 
-// Example: 1 ETH = 1000 BASE tokens
-// Rate = 1000 * 10^18
+// 1 ETH = 1000 BASE tokens
 tokenSale.addPaymentToken(address(0), 1000 * 10**18, 18);
 ```
 
-### 4. (Optional) Enable Whitelist
+### 4. (Optional) Configure Oracle Pricing
+
+All oracle-derived rates are anchored to a base payment token. Every feed must quote against the same currency (e.g. USD):
 
 ```solidity
+// Anchor: 1 token = 1 EUR (EURc is an allowed payment token)
+tokenSale.setBaseRate(eurTokenAddress, 1 * 10**18);
+
+// Feeds — thresholds should match each feed's heartbeat
+tokenSale.configureOracle(eurTokenAddress, EUR_USD_FEED, 24 hours);
+tokenSale.configureOracle(address(0), ETH_USD_FEED, 1 hours);
+
+// Recommended: sanity bounds in feed decimals
+tokenSale.setOraclePriceBounds(address(0), 500e8, 50000e8);
+
+// Required on L2s (Arbitrum/Optimism/Base)
+tokenSale.setSequencerUptimeFeed(SEQUENCER_UPTIME_FEED, 1 hours);
+```
+
+If ETH/USD = 3000 and EUR/USD = 1.10, one ETH buys `3000 / 1.10 ≈ 2727` tokens. See [ORACLE_FEEDS_README.md](./ORACLE_FEEDS_README.md) for feed addresses.
+
+### 5. (Optional) Sale Limits & Whitelist
+
+```solidity
+tokenSale.configureSale(hardCap, minPurchase, maxPerUser, startTime, endTime);
+
 tokenSale.updateWhitelistRequirement(true);
 tokenSale.addToWhitelist(userAddress);
 ```
 
 ## 💡 Example Usage
 
-### Purchase with ERC20 Token
-
 ```solidity
-// User approves payment token
-usdc.approve(tokenSaleAddress, 1000 * 10**6);
-
-// Purchase tokens (minTokensOut from calculateTokens, orderId optional)
-uint256 minOut = tokenSale.calculateTokens(usdcAddress, 1000 * 10**6);
-uint256 tokens = tokenSale.purchaseWithToken(usdcAddress, 1000 * 10**6, minOut, bytes32(0));
-```
-
-### Purchase with ETH
-
-```solidity
-// Purchase tokens with ETH
-uint256 minOut = tokenSale.calculateTokens(address(0), 1 ether);
-uint256 tokens = tokenSale.purchaseWithETH{value: 1 ether}(minOut, bytes32(0));
-```
-
-### Calculate Tokens Before Purchase
-
-```solidity
+// Quote first, then purchase with slippage protection
 uint256 paymentAmount = 1000 * 10**6; // 1000 USDC
-uint256 expectedTokens = tokenSale.calculateTokens(usdcAddress, paymentAmount);
+uint256 minOut = tokenSale.calculateTokens(usdcAddress, paymentAmount);
+
+usdc.approve(tokenSaleAddress, paymentAmount);
+uint256 tokens = tokenSale.purchaseWithToken(usdcAddress, paymentAmount, minOut, bytes32(0));
+
+// Purchase with ETH
+uint256 minOutEth = tokenSale.calculateTokens(address(0), 1 ether);
+uint256 tokensEth = tokenSale.purchaseWithETH{value: 1 ether}(minOutEth, bytes32(0));
 ```
+
+See [CAST_COMMANDS.md](./CAST_COMMANDS.md) for the complete `cast` command reference.
 
 ## 📊 Rate Calculation
 
-The rate is stored as: **base tokens (18 decimals) per 1 unit of payment token**
+The rate is stored as **base tokens (18 decimals) per 1 whole unit of payment token**:
 
-### Formula
 ```
 baseTokens = (paymentAmount * rate) / (10^paymentTokenDecimals)
 ```
 
-### Examples
+**USDC (6 decimals):** rate `100 * 10^18` → paying `1000 * 10^6` yields `(1000e6 * 100e18) / 1e6 = 100,000e18` base tokens.
 
-**USDC (6 decimals):**
-- Rate: 100 * 10^18 (100 base tokens per 1 USDC)
-- Payment: 1000 USDC = 1000 * 10^6
-- Calculation: (1000 * 10^6 * 100 * 10^18) / 10^6 = 100,000 * 10^18 base tokens
+**ETH (18 decimals):** rate `1000 * 10^18` → paying `1e18` yields `(1e18 * 1000e18) / 1e18 = 1000e18` base tokens.
 
-**ETH (18 decimals):**
-- Rate: 1000 * 10^18 (1000 base tokens per 1 ETH)
-- Payment: 1 ETH = 1 * 10^18
-- Calculation: (1 * 10^18 * 1000 * 10^18) / 10^18 = 1000 * 10^18 base tokens
-
-## ⚠️ Important Notes
-
-1. **MINTER_ROLE Required**: The TokenSale contract must have `MINTER_ROLE` on the base token contract
-2. **Payment Forwarding**: All payments are immediately forwarded to the `paymentRecipient` address
-3. **Token Minting**: Base tokens are minted directly to the buyer's address
-4. **Rate Precision**: Rates should be calculated carefully to account for token decimals
-5. **Whitelist**: Whitelist is optional and disabled by default
+In oracle mode the rate is derived instead: `rate = baseRate * paymentTokenPrice / basePaymentTokenPrice`, with both prices normalized to 18 decimals.
 
 ## 🔄 Upgradeability
 
 The contract uses OpenZeppelin's transparent proxy pattern:
-- **Proxy Address**: Remains constant (this is the address users interact with)
-- **Implementation**: Can be upgraded by `DEFAULT_ADMIN_ROLE`
-- **State**: Stored in proxy, persists across upgrades
+
+- **Proxy address** stays constant — this is the address users and integrations use
+- **Implementation** can be replaced by the ProxyAdmin owner
+- **State** lives in the proxy and persists across upgrades
+- Reentrancy protection uses transient storage (`ReentrancyGuardTransient`) and OpenZeppelin's other parents use ERC-7201 namespaced storage, minimizing storage-layout risk; new state variables must still only ever be **appended**
+- The test suite runs OpenZeppelin's upgrade-safety validation on every deployment
 
 ## ⚠️ Security Considerations
 
-- ✅ **Reentrancy Protection**: All purchase functions use `nonReentrant` (OpenZeppelin `ReentrancyGuardTransient`, requires a Cancun/EIP-1153 chain)
-- ✅ **Access Control**: Admin functions protected with role checks
-- ✅ **Pausable**: Can pause sales in emergencies
-- ✅ **Whitelist**: Optional additional security layer
-- ✅ **SafeERC20**: Uses SafeERC20 for token transfers
-- ✅ **Input Validation**: All inputs are validated; payment token decimals are verified against the token contract
-- ✅ **Slippage Protection**: Buyers pass `minTokensOut`; purchases revert if the rate moved against them
-- ✅ **Fail-Closed Oracles**: If oracle mode is on and the price is stale, invalid, or out of the configured bounds, purchases revert (no silent fallback to a manual rate). To sell at the manual rate, the admin must explicitly call `setOracleMode(token, false)`
-- ✅ **Oracle Hardening**: Per-feed staleness thresholds, optional min/max price bounds (`setOraclePriceBounds`) against pinned Chainlink circuit breakers, and an optional L2 sequencer uptime check (`setSequencerUptimeFeed` — required on Arbitrum/Optimism/Base)
-- ✅ **Per-User Limits**: Enforced against tokens purchased through the sale (`totalPurchased`), so they cannot be bypassed by moving tokens to another wallet or griefed by unsolicited transfers
-- ✅ **Order IDs**: Scoped per buyer, so a third party cannot front-run and burn someone else's orderId
+- **Reentrancy Protection** — all purchase functions are `nonReentrant` (OpenZeppelin `ReentrancyGuardTransient`, requires Cancun/EIP-1153) and follow checks-effects-interactions
+- **Access Control** — admin functions gated by roles; whitelist management separable via `WHITELIST_ROLE`
+- **Fail-Closed Oracles** — if oracle mode is on and the price is stale, invalid, out of bounds, or the L2 sequencer is down, purchases revert; there is no silent fallback to a manual rate. To sell at the manual rate the admin must explicitly call `setOracleMode(token, false)`
+- **Oracle Hardening** — per-feed staleness thresholds, optional min/max price bounds against pinned Chainlink aggregator circuit breakers, optional sequencer uptime check
+- **Slippage Protection** — buyers pass `minTokensOut`; purchases revert if the rate moved against them
+- **Per-User Limits** — enforced against `totalPurchased` (tokens bought through the sale), so they cannot be bypassed by moving tokens to another wallet nor griefed by unsolicited transfers
+- **Order IDs** — scoped per buyer, so a third party cannot front-run and burn someone else's orderId
+- **Input Validation** — payment token decimals verified against the token contract; ETH fixed at 18 decimals
+- **SafeERC20** everywhere; payments forwarded immediately, the contract holds no funds
 
 ### Operational requirements
 
-- **Use a multisig (ideally with a timelock) for the admin and proxy admin.** The admin can change rates, redirect payments, withdraw funds, and upgrade the implementation — a single compromised EOA compromises the entire sale.
+- **Use a multisig (ideally with a timelock) for the admin and the ProxyAdmin owner.** The admin can change rates, redirect payments, withdraw stray funds, and upgrade the implementation — a single compromised EOA compromises the entire sale.
 - **Off-chain order reconciliation** must verify the buyer address and amounts from the `TokensPurchased` event, never the orderId alone.
-- **Do not allow fee-on-transfer or rebasing tokens as payment tokens** — buyers would be credited for the nominal amount while the recipient receives less.
-- **Hard cap** is measured against the base token's `totalSupply()`: tokens minted elsewhere consume the cap and burns free it up.
+- **Do not allow fee-on-transfer or rebasing tokens as payment tokens** — buyers would be credited the nominal amount while the recipient receives less.
+- **Hard cap** is measured against the base token's `totalSupply()`: tokens minted elsewhere consume the cap, and burns free it up.
+- **Keep manual rates current even in oracle mode** — they take effect the moment oracle mode is disabled.
+
+To report a vulnerability, see [SECURITY.md](./SECURITY.md).
+
+## 🧪 Testing
+
+```bash
+npm run test              # 106 deterministic unit tests (Foundry)
+npm run test:oraclefeeds  # live Chainlink feed checks on a Sepolia fork
+```
+
+The unit suite covers purchases, all admin flows, access control on every privileged function, sale limits, oracle pricing (staleness, bounds, sequencer, failure modes), slippage, order-ID semantics, and the upgrade-safety validation.
 
 ## 📚 Documentation
 
-Auto-generated API documentation from NatSpec comments is available in the `docs/` directory. Generate it with:
-
-```bash
-npm run docgen
-```
-
-Or generate and serve it locally (opens in browser automatically):
-
-```bash
-npm run docgen:serve
-```
+- [CAST_COMMANDS.md](./CAST_COMMANDS.md) — full `cast` command reference for every contract function
+- [DEPLOY_NODEJS.md](./DEPLOY_NODEJS.md) — Node.js/ethers deployment guide
+- [ORACLE_FEEDS_README.md](./ORACLE_FEEDS_README.md) — Chainlink feed selection and fork tests
+- `npm run docgen` — generate API documentation from NatSpec into `docs/`
 
 ## 📄 License
 
-MIT
+[MIT](./LICENSE)

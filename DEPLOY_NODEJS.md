@@ -28,7 +28,7 @@ Set the following environment variables before running the deployment script:
 
 ```bash
 export RPC_URL="http://localhost:8545"  # Your Ethereum RPC URL
-export PRIVATE_KEY="0x..."                # Private key of deployer account (without 0x prefix is also OK)
+export PRIVATE_KEY="0x..."                # 0x-prefixed private key of the deployer account
 export BASE_TOKEN="0x..."                 # Address of the base token contract
 export PAYMENT_RECIPIENT="0x..."          # Address that receives payments
 export ADMIN="0x..."                      # Admin address for the TokenSale contract
@@ -171,7 +171,7 @@ If you prefer to use Foundry's compilation output instead of solc directly, you 
 
 2. Then modify the script to read from `out/` directory instead of compiling with solc.
 
-However, this script uses solc directly as requested, which gives you full control over the compilation process.
+However, this script uses solc directly, which gives you full control over the compilation process and no dependency on Foundry at deployment time.
 
 ## Security Considerations
 

@@ -29,10 +29,32 @@ jobs:
         run: forge --version
 
       - name: Run Forge fmt
-        run: forge fmt --check
+        run: forge fmt --check src/ test/ script/
 
       - name: Run Forge build
         run: forge build --sizes
 
+      # The Sepolia oracle-feed tests fork a live network and run in a separate,
+      # non-blocking job so the main suite stays deterministic.
       - name: Run Forge tests
-        run: forge test -vvv
+        run: forge test -vvv --no-match-path "test/SepoliaOracleFeeds.t.sol"
+
+  fork-tests:
+    name: Sepolia fork tests (non-blocking)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+          submodules: recursive
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+
+      - name: Run Sepolia oracle feed tests
+        run: forge test -vv --match-path "test/SepoliaOracleFeeds.t.sol"
+        env:
+          ETH_SEPOLIA_RPC: ${{ secrets.ETH_SEPOLIA_RPC }}

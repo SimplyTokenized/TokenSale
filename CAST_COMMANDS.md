@@ -114,6 +114,11 @@ cast call $TOKEN_SALE_ADDRESS "totalSales()(uint256)" --rpc-url $RPC_URL
 cast call $TOKEN_SALE_ADDRESS "revenueByToken(address)(uint256)" <TOKEN_ADDRESS> --rpc-url $RPC_URL
 ```
 
+### Check if a Buyer Has Used an Order ID
+```bash
+cast call $TOKEN_SALE_ADDRESS "usedOrderIds(address,bytes32)(bool)" <BUYER_ADDRESS> <ORDER_ID> --rpc-url $RPC_URL
+```
+
 ### Calculate Tokens for Payment Amount
 ```bash
 cast call $TOKEN_SALE_ADDRESS "calculateTokens(address,uint256)(uint256)" <TOKEN_ADDRESS> <AMOUNT> --rpc-url $RPC_URL
@@ -337,6 +342,36 @@ cast send $TOKEN_SALE_ADDRESS "updateStalenessThreshold(address,uint256)" <TOKEN
 ```bash
 cast send $TOKEN_SALE_ADDRESS "updateDefaultStalenessThreshold(uint256)" <THRESHOLD_SECONDS> --private-key $PRIVATE_KEY --rpc-url $RPC_URL
 ```
+
+### Set Oracle Price Bounds (recommended)
+```bash
+# Bounds are in the feed's own decimals; 0 disables a bound.
+# Protects against a Chainlink aggregator pinned at its minAnswer/maxAnswer circuit breaker.
+cast send $TOKEN_SALE_ADDRESS "setOraclePriceBounds(address,uint256,uint256)" \
+  <TOKEN_ADDRESS> <MIN_PRICE> <MAX_PRICE> \
+  --private-key $PRIVATE_KEY --rpc-url $RPC_URL
+```
+
+**Example:**
+```bash
+# ETH/USD feed (8 decimals): accept prices between $500 and $50,000
+cast send $TOKEN_SALE_ADDRESS "setOraclePriceBounds(address,uint256,uint256)" \
+  0x0000000000000000000000000000000000000000 50000000000 5000000000000 \
+  --private-key $PRIVATE_KEY --rpc-url $RPC_URL
+```
+
+### Set L2 Sequencer Uptime Feed (required on L2s)
+```bash
+# Configure the Chainlink sequencer uptime feed and grace period (seconds).
+# Use address(0) to disable the check on L1 deployments.
+cast send $TOKEN_SALE_ADDRESS "setSequencerUptimeFeed(address,uint256)" \
+  <SEQUENCER_FEED_ADDRESS> <GRACE_PERIOD_SECONDS> \
+  --private-key $PRIVATE_KEY --rpc-url $RPC_URL
+```
+
+**Note:** Oracle pricing is fail-closed. If a feed is stale, returns an invalid or
+out-of-bounds price, or the sequencer is down, purchases revert. To sell at the manual
+rate instead, explicitly disable oracle mode with `setOracleMode(<TOKEN>, false)`.
 
 ---
 

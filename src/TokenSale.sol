@@ -122,7 +122,13 @@ contract TokenSale is Initializable, AccessControlUpgradeable, ReentrancyGuardTr
     event MaxPurchasePerUserUpdated(uint256 newMaxPurchasePerUser);
     event MaxPurchasePerUserSet(address indexed user, uint256 maxPurchase);
     event SaleTimeWindowUpdated(uint256 startTime, uint256 endTime);
-    event SaleConfigured(uint256 hardCap, uint256 minPurchaseAmount, uint256 maxPurchasePerUser, uint256 saleStartTime, uint256 saleEndTime);
+    event SaleConfigured(
+        uint256 hardCap,
+        uint256 minPurchaseAmount,
+        uint256 maxPurchasePerUser,
+        uint256 saleStartTime,
+        uint256 saleEndTime
+    );
     event EmergencyWithdrawal(address indexed token, address indexed recipient, uint256 amount);
 
     /// @custom:oz-upgrades-unsafe-allow constructor
@@ -136,11 +142,7 @@ contract TokenSale is Initializable, AccessControlUpgradeable, ReentrancyGuardTr
      * @param _paymentRecipient Address that receives payment tokens
      * @param _admin Admin address
      */
-    function initialize(
-        address _baseToken,
-        address _paymentRecipient,
-        address _admin
-    ) public initializer {
+    function initialize(address _baseToken, address _paymentRecipient, address _admin) public initializer {
         __AccessControl_init();
         __Pausable_init();
 
@@ -178,7 +180,10 @@ contract TokenSale is Initializable, AccessControlUpgradeable, ReentrancyGuardTr
      *                        Then tokensPerPayment = 100 * 10^18, paymentTokenDecimals_ = 6
      *                        Calculation: (paymentAmount * tokensPerPayment) / 10^paymentTokenDecimals_
      */
-    function addPaymentToken(address paymentToken, uint256 tokensPerPayment, uint8 paymentTokenDecimals_) external onlyRole(ADMIN_ROLE) {
+    function addPaymentToken(address paymentToken, uint256 tokensPerPayment, uint8 paymentTokenDecimals_)
+        external
+        onlyRole(ADMIN_ROLE)
+    {
         require(tokensPerPayment > 0, "TokenSale: invalid rate");
         require(paymentTokenDecimals_ <= 18, "TokenSale: invalid decimals");
         if (paymentToken == address(0)) {
@@ -234,7 +239,10 @@ contract TokenSale is Initializable, AccessControlUpgradeable, ReentrancyGuardTr
      * @param account Address to add
      */
     function addToWhitelist(address account) external {
-        require(hasRole(ADMIN_ROLE, msg.sender) || hasRole(WHITELIST_ROLE, msg.sender), "TokenSale: must have admin or whitelist role");
+        require(
+            hasRole(ADMIN_ROLE, msg.sender) || hasRole(WHITELIST_ROLE, msg.sender),
+            "TokenSale: must have admin or whitelist role"
+        );
         require(account != address(0), "TokenSale: invalid account");
         require(!whitelist[account], "TokenSale: already whitelisted");
         whitelist[account] = true;
@@ -246,7 +254,10 @@ contract TokenSale is Initializable, AccessControlUpgradeable, ReentrancyGuardTr
      * @param account Address to remove
      */
     function removeFromWhitelist(address account) external {
-        require(hasRole(ADMIN_ROLE, msg.sender) || hasRole(WHITELIST_ROLE, msg.sender), "TokenSale: must have admin or whitelist role");
+        require(
+            hasRole(ADMIN_ROLE, msg.sender) || hasRole(WHITELIST_ROLE, msg.sender),
+            "TokenSale: must have admin or whitelist role"
+        );
         require(whitelist[account], "TokenSale: not whitelisted");
         whitelist[account] = false;
         emit WhitelistRemoved(account);
@@ -270,7 +281,6 @@ contract TokenSale is Initializable, AccessControlUpgradeable, ReentrancyGuardTr
         paymentRecipient = _paymentRecipient;
         emit PaymentRecipientUpdated(_paymentRecipient);
     }
-
 
     /**
      * @dev Pause token sales
@@ -303,18 +313,20 @@ contract TokenSale is Initializable, AccessControlUpgradeable, ReentrancyGuardTr
      * @param stalenessThreshold Maximum seconds before price is considered stale (0 uses default of 24 hours).
      *                           Set per feed: each feed's own threshold is enforced (match the feed's heartbeat).
      */
-    function configureOracle(
-        address paymentToken,
-        address oracle,
-        uint256 stalenessThreshold
-    ) external onlyRole(ADMIN_ROLE) {
+    function configureOracle(address paymentToken, address oracle, uint256 stalenessThreshold)
+        external
+        onlyRole(ADMIN_ROLE)
+    {
         require(allowedPaymentTokens[paymentToken], "TokenSale: payment token not allowed");
         require(oracle != address(0), "TokenSale: invalid oracle address");
 
         // Verify oracle is valid by checking it has the required interface
-        try AggregatorV3Interface(oracle).decimals() returns (uint8) {
-            // Oracle is valid
-        } catch {
+        try AggregatorV3Interface(oracle).decimals() returns (
+            uint8
+        ) {
+        // Oracle is valid
+        }
+        catch {
             revert("TokenSale: invalid oracle interface");
         }
 
@@ -385,7 +397,10 @@ contract TokenSale is Initializable, AccessControlUpgradeable, ReentrancyGuardTr
      * @param minPrice Minimum acceptable oracle answer (0 = no lower bound)
      * @param maxPrice Maximum acceptable oracle answer (0 = no upper bound)
      */
-    function setOraclePriceBounds(address paymentToken, uint256 minPrice, uint256 maxPrice) external onlyRole(ADMIN_ROLE) {
+    function setOraclePriceBounds(address paymentToken, uint256 minPrice, uint256 maxPrice)
+        external
+        onlyRole(ADMIN_ROLE)
+    {
         require(allowedPaymentTokens[paymentToken], "TokenSale: payment token not allowed");
         require(maxPrice == 0 || minPrice < maxPrice, "TokenSale: invalid price bounds");
         oracleMinPrice[paymentToken] = minPrice;
@@ -402,9 +417,12 @@ contract TokenSale is Initializable, AccessControlUpgradeable, ReentrancyGuardTr
      */
     function setSequencerUptimeFeed(address feed, uint256 gracePeriod) external onlyRole(ADMIN_ROLE) {
         if (feed != address(0)) {
-            try AggregatorV3Interface(feed).decimals() returns (uint8) {
-                // Feed is valid
-            } catch {
+            try AggregatorV3Interface(feed).decimals() returns (
+                uint8
+            ) {
+            // Feed is valid
+            }
+            catch {
                 revert("TokenSale: invalid sequencer feed");
             }
         }
@@ -554,7 +572,7 @@ contract TokenSale is Initializable, AccessControlUpgradeable, ReentrancyGuardTr
             require(withdrawAmount > 0, "TokenSale: no ETH to withdraw");
             require(withdrawAmount <= balance, "TokenSale: insufficient ETH balance");
 
-            (bool sent, ) = recipient.call{value: withdrawAmount}("");
+            (bool sent,) = recipient.call{value: withdrawAmount}("");
             require(sent, "TokenSale: ETH withdrawal failed");
             emit EmergencyWithdrawal(address(0), recipient, withdrawAmount);
         } else {
@@ -646,17 +664,32 @@ contract TokenSale is Initializable, AccessControlUpgradeable, ReentrancyGuardTr
      * @param isPaymentFeed True for the payment token feed, false for the base payment token feed (error messages)
      * @return normalizedPrice The price normalized to 18 decimals
      */
-    function _readOraclePrice(address token, address oracle, bool isPaymentFeed) internal view returns (uint256 normalizedPrice) {
+    function _readOraclePrice(address token, address oracle, bool isPaymentFeed)
+        internal
+        view
+        returns (uint256 normalizedPrice)
+    {
         AggregatorV3Interface feed = AggregatorV3Interface(oracle);
-        (, int256 price, , uint256 priceUpdatedAt, ) = feed.latestRoundData();
+        (, int256 price,, uint256 priceUpdatedAt,) = feed.latestRoundData();
 
-        require(price > 0, isPaymentFeed ? "TokenSale: invalid payment token price" : "TokenSale: invalid base payment token price");
-        require(priceUpdatedAt > 0, isPaymentFeed ? "TokenSale: payment token price not updated" : "TokenSale: base payment token price not updated");
+        require(
+            price > 0,
+            isPaymentFeed ? "TokenSale: invalid payment token price" : "TokenSale: invalid base payment token price"
+        );
+        require(
+            priceUpdatedAt > 0,
+            isPaymentFeed
+                ? "TokenSale: payment token price not updated"
+                : "TokenSale: base payment token price not updated"
+        );
 
         // Each feed uses its own staleness threshold (falling back to the default)
         uint256 threshold = oracleStalenessThreshold[token];
         if (threshold == 0) threshold = defaultStalenessThreshold;
-        require(block.timestamp - priceUpdatedAt <= threshold, isPaymentFeed ? "TokenSale: payment token price too stale" : "TokenSale: base payment token price too stale");
+        require(
+            block.timestamp - priceUpdatedAt <= threshold,
+            isPaymentFeed ? "TokenSale: payment token price too stale" : "TokenSale: base payment token price too stale"
+        );
 
         // Optional sanity bounds (in feed decimals) against a pinned aggregator circuit breaker
         uint256 unsignedPrice = uint256(price);
@@ -682,7 +715,7 @@ contract TokenSale is Initializable, AccessControlUpgradeable, ReentrancyGuardTr
         if (sequencerUptimeFeed == address(0)) {
             return;
         }
-        (, int256 answer, uint256 startedAt, , ) = AggregatorV3Interface(sequencerUptimeFeed).latestRoundData();
+        (, int256 answer, uint256 startedAt,,) = AggregatorV3Interface(sequencerUptimeFeed).latestRoundData();
         // Chainlink sequencer uptime feeds: answer == 0 means the sequencer is up
         require(answer == 0, "TokenSale: sequencer down");
         require(block.timestamp - startedAt > sequencerGracePeriod, "TokenSale: sequencer grace period not over");
@@ -699,12 +732,12 @@ contract TokenSale is Initializable, AccessControlUpgradeable, ReentrancyGuardTr
      * @param orderId Optional order ID (bytes32(0) means no orderId). Must be unique per buyer.
      * @return baseTokensReceived Amount of base tokens received
      */
-    function purchaseWithToken(
-        address paymentToken,
-        uint256 paymentAmount,
-        uint256 minTokensOut,
-        bytes32 orderId
-    ) external nonReentrant whenNotPaused returns (uint256 baseTokensReceived) {
+    function purchaseWithToken(address paymentToken, uint256 paymentAmount, uint256 minTokensOut, bytes32 orderId)
+        external
+        nonReentrant
+        whenNotPaused
+        returns (uint256 baseTokensReceived)
+    {
         require(paymentToken != address(0), "TokenSale: use purchaseWithETH for ETH");
 
         // Checks and effects (statistics/orderId updates) before any external interaction
@@ -728,12 +761,18 @@ contract TokenSale is Initializable, AccessControlUpgradeable, ReentrancyGuardTr
      * @param orderId Optional order ID (bytes32(0) means no orderId). Must be unique per buyer.
      * @return baseTokensReceived Amount of base tokens received
      */
-    function purchaseWithETH(uint256 minTokensOut, bytes32 orderId) external payable nonReentrant whenNotPaused returns (uint256 baseTokensReceived) {
+    function purchaseWithETH(uint256 minTokensOut, bytes32 orderId)
+        external
+        payable
+        nonReentrant
+        whenNotPaused
+        returns (uint256 baseTokensReceived)
+    {
         // Checks and effects (statistics/orderId updates) before any external interaction
         baseTokensReceived = _validateAndRecordPurchase(address(0), msg.value, minTokensOut, orderId);
 
         // Transfer ETH to payment recipient
-        (bool sent, ) = paymentRecipient.call{value: msg.value}("");
+        (bool sent,) = paymentRecipient.call{value: msg.value}("");
         require(sent, "TokenSale: ETH transfer failed");
 
         // Mint base tokens to buyer
@@ -808,7 +847,10 @@ contract TokenSale is Initializable, AccessControlUpgradeable, ReentrancyGuardTr
             userMaxPurchase = maxPurchasePerUser;
         }
         if (userMaxPurchase > 0) {
-            require(totalPurchased[msg.sender] + baseTokensReceived <= userMaxPurchase, "TokenSale: user purchase limit exceeded");
+            require(
+                totalPurchased[msg.sender] + baseTokensReceived <= userMaxPurchase,
+                "TokenSale: user purchase limit exceeded"
+            );
         }
 
         // Update statistics

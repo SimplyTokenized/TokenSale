@@ -28,9 +28,21 @@ For `base = EUR/EURc` and investment in `USDC`, the contract can derive:
 
 In `TokenSale`, you configure:
 
-1. Base token oracle mapping for EUR/EURc with `EUR/USD`
-2. Payment token oracle mapping for USDC with `USDC/USD`
-3. Base rate via `setBaseRate(...)`
+1. Base rate via `setBaseRate(...)` (the EUR/EURc token must already be an allowed payment token)
+2. Base token oracle mapping for EUR/EURc with `EUR/USD` via `configureOracle(...)`
+3. Payment token oracle mapping for USDC with `USDC/USD` via `configureOracle(...)`
+
+### Oracle safety behavior
+
+- **Fail-closed:** when oracle mode is enabled for a token, any oracle failure (stale price,
+  invalid answer, out-of-bounds price, sequencer down) reverts the purchase. There is no
+  silent fallback to the manual rate; switch explicitly with `setOracleMode(token, false)`.
+- **Per-feed staleness:** set each feed's threshold to its heartbeat (e.g. `EUR/USD` on
+  mainnet updates roughly daily, `ETH/USD` roughly hourly).
+- **Price bounds (recommended):** `setOraclePriceBounds(token, min, max)` in the feed's own
+  decimals protects against an aggregator pinned at its built-in minAnswer/maxAnswer.
+- **L2 deployments:** configure `setSequencerUptimeFeed(feed, gracePeriod)` — without it,
+  stale-but-fresh-looking prices can be served while the sequencer is down.
 
 ## Dedicated oracle testcase
 

@@ -17,3 +17,6 @@ docs/
 
 # Documentation
 docs/
+
+# macOS
+.DS_Store

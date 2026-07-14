@@ -27,10 +27,7 @@ contract DeployTokenSale is Script {
         address proxyAddress = Upgrades.deployTransparentProxy(
             "TokenSale.sol:TokenSale",
             admin, // Proxy admin
-            abi.encodeCall(
-                TokenSale.initialize,
-                (baseToken, paymentRecipient, admin)
-            )
+            abi.encodeCall(TokenSale.initialize, (baseToken, paymentRecipient, admin))
         );
 
         tokenSale = TokenSale(proxyAddress);

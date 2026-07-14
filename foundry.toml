@@ -9,5 +9,12 @@ extra_output = ["storageLayout"]
 gas_reports = ["TokenSale"]
 optimizer = true
 optimizer_runs = 200
+# The contract uses OpenZeppelin ReentrancyGuardTransient (EIP-1153 transient storage),
+# so deployment targets must support the Cancun hardfork.
+evm_version = "cancun"
+
+# Profile used by GitHub Actions (see .github/workflows/test.yml)
+[profile.ci]
+verbosity = 3
 
 # See more config options https://github.com/foundry-rs/foundry/blob/master/crates/config/README.md#all-options
