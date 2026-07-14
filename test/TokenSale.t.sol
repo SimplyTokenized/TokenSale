@@ -11,11 +11,17 @@ import {AggregatorV3Interface} from "@chainlink/contracts/src/v0.8/shared/interf
 
 contract MockERC20 is ERC20, AccessControl {
     bytes32 public constant MINTER_ROLE = keccak256("MINTER_ROLE");
+    uint8 private immutable _decimals;
 
-    constructor(string memory name, string memory symbol) ERC20(name, symbol) {
+    constructor(string memory name, string memory symbol, uint8 decimals_) ERC20(name, symbol) {
+        _decimals = decimals_;
         _grantRole(DEFAULT_ADMIN_ROLE, msg.sender);
         _grantRole(MINTER_ROLE, msg.sender);
-        _mint(msg.sender, 1000000 * 10 ** decimals());
+        _mint(msg.sender, 1000000 * 10 ** decimals_);
+    }
+
+    function decimals() public view override returns (uint8) {
+        return _decimals;
     }
 
     function mint(address to, uint256 amount) external onlyRole(MINTER_ROLE) {
@@ -83,8 +89,8 @@ contract TokenSaleTest is Test {
         user2 = address(0x2);
 
         // Deploy mock tokens
-        baseToken = new MockERC20("Base Token", "BASE");
-        usdc = new MockERC20("USD Coin", "USDC");
+        baseToken = new MockERC20("Base Token", "BASE", 18);
+        usdc = new MockERC20("USD Coin", "USDC", 6);
 
         // Deploy TokenSale contract with proxy
         address proxyAddress = Upgrades.deployTransparentProxy(
@@ -136,7 +142,7 @@ contract TokenSaleTest is Test {
 
         vm.startPrank(user1);
         usdc.approve(address(tokenSale), paymentAmount);
-        uint256 tokensReceived = tokenSale.purchaseWithToken(address(usdc), paymentAmount, bytes32(0));
+        uint256 tokensReceived = tokenSale.purchaseWithToken(address(usdc), paymentAmount, 0, bytes32(0));
         vm.stopPrank();
 
         assertEq(tokensReceived, expectedTokens);
@@ -151,7 +157,7 @@ contract TokenSaleTest is Test {
 
         vm.deal(user1, ethAmount);
         vm.startPrank(user1);
-        uint256 tokensReceived = tokenSale.purchaseWithETH{value: ethAmount}(bytes32(0));
+        uint256 tokensReceived = tokenSale.purchaseWithETH{value: ethAmount}(0, bytes32(0));
         vm.stopPrank();
 
         assertEq(tokensReceived, expectedTokens);
@@ -170,7 +176,7 @@ contract TokenSaleTest is Test {
         vm.startPrank(user1);
         usdc.approve(address(tokenSale), paymentAmount);
         vm.expectRevert("TokenSale: not whitelisted");
-        tokenSale.purchaseWithToken(address(usdc), paymentAmount, bytes32(0));
+        tokenSale.purchaseWithToken(address(usdc), paymentAmount, 0, bytes32(0));
         vm.stopPrank();
 
         // Add to whitelist
@@ -179,7 +185,7 @@ contract TokenSaleTest is Test {
 
         // Now should work
         vm.startPrank(user1);
-        tokenSale.purchaseWithToken(address(usdc), paymentAmount, bytes32(0));
+        tokenSale.purchaseWithToken(address(usdc), paymentAmount, 0, bytes32(0));
         vm.stopPrank();
     }
 
@@ -206,7 +212,7 @@ contract TokenSaleTest is Test {
         vm.startPrank(user1);
         usdc.approve(address(tokenSale), paymentAmount);
         vm.expectRevert("TokenSale: payment token not allowed");
-        tokenSale.purchaseWithToken(address(usdc), paymentAmount, bytes32(0));
+        tokenSale.purchaseWithToken(address(usdc), paymentAmount, 0, bytes32(0));
         vm.stopPrank();
     }
 
@@ -221,7 +227,7 @@ contract TokenSaleTest is Test {
         vm.startPrank(user1);
         usdc.approve(address(tokenSale), paymentAmount);
         vm.expectRevert();
-        tokenSale.purchaseWithToken(address(usdc), paymentAmount, bytes32(0));
+        tokenSale.purchaseWithToken(address(usdc), paymentAmount, 0, bytes32(0));
         vm.stopPrank();
 
         // Unpause
@@ -230,7 +236,7 @@ contract TokenSaleTest is Test {
 
         // Now should work
         vm.startPrank(user1);
-        tokenSale.purchaseWithToken(address(usdc), paymentAmount, bytes32(0));
+        tokenSale.purchaseWithToken(address(usdc), paymentAmount, 0, bytes32(0));
         vm.stopPrank();
     }
 
@@ -241,13 +247,13 @@ contract TokenSaleTest is Test {
         // Purchase with USDC
         vm.startPrank(user1);
         usdc.approve(address(tokenSale), paymentAmount1);
-        uint256 tokens1 = tokenSale.purchaseWithToken(address(usdc), paymentAmount1, bytes32(0));
+        uint256 tokens1 = tokenSale.purchaseWithToken(address(usdc), paymentAmount1, 0, bytes32(0));
         vm.stopPrank();
 
         // Purchase with ETH
         vm.deal(user2, paymentAmount2);
         vm.startPrank(user2);
-        uint256 tokens2 = tokenSale.purchaseWithETH{value: paymentAmount2}(bytes32(0));
+        uint256 tokens2 = tokenSale.purchaseWithETH{value: paymentAmount2}(0, bytes32(0));
         vm.stopPrank();
 
         // Check statistics
@@ -331,7 +337,7 @@ contract TokenSaleTest is Test {
 
         vm.startPrank(user1);
         usdc.approve(address(tokenSale), paymentAmount);
-        uint256 tokensReceived = tokenSale.purchaseWithToken(address(usdc), paymentAmount, bytes32(0));
+        uint256 tokensReceived = tokenSale.purchaseWithToken(address(usdc), paymentAmount, 0, bytes32(0));
         vm.stopPrank();
 
         assertEq(tokensReceived, expectedTokens);
@@ -341,7 +347,7 @@ contract TokenSaleTest is Test {
     // ============ Oracle Tests ============
 
     function test_OracleBasedPricing() public {
-        MockERC20 eur = new MockERC20("Euro", "EUR");
+        MockERC20 eur = new MockERC20("Euro", "EUR", 18);
         MockChainlinkOracle ethUsdOracle = new MockChainlinkOracle(8, 3000 * 10 ** 8, "ETH/USD");
         MockChainlinkOracle eurUsdOracle = new MockChainlinkOracle(8, 110000000, "EUR/USD"); // 1.10 USD per EUR (1.10 * 10^8)
 
@@ -385,7 +391,7 @@ contract TokenSaleTest is Test {
         vm.deal(user1, ethAmount);
         
         vm.startPrank(user1);
-        uint256 tokensReceived = tokenSale.purchaseWithETH{value: ethAmount}(bytes32(0));
+        uint256 tokensReceived = tokenSale.purchaseWithETH{value: ethAmount}(0, bytes32(0));
         vm.stopPrank();
 
         // Expected: 1 ETH = 2727.27... tokens (approximately)
@@ -393,61 +399,196 @@ contract TokenSaleTest is Test {
         assertApproxEqRel(tokensReceived, expectedTokens, 0.01e18); // 1% tolerance for rounding
     }
 
-    function test_OracleFallbackToManualRate() public {
+    function test_OracleFailureReverts() public {
+        // Fail-closed: a broken oracle must revert the purchase, never silently
+        // fall back to the manual rate
+        MockERC20 eur = new MockERC20("Euro", "EUR", 18);
+        MockChainlinkOracle eurUsdOracle = new MockChainlinkOracle(8, 110000000, "EUR/USD");
         MockChainlinkOracle failingOracle = new MockChainlinkOracle(8, -1, "FAILING/USD"); // Negative price will fail
 
-        // Add ETH with manual rate
+        uint256 baseRate = 1 * 10 ** 18;
         vm.prank(admin);
-        tokenSale.addPaymentToken(address(0), 1000 * 10 ** 18, 18);
-
-        // Configure oracle (but it will fail)
+        tokenSale.addPaymentToken(address(eur), baseRate, 18);
+        vm.prank(admin);
+        tokenSale.setBaseRate(address(eur), baseRate);
+        vm.prank(admin);
+        tokenSale.configureOracle(address(eur), address(eurUsdOracle), 3600);
         vm.prank(admin);
         tokenSale.configureOracle(address(0), address(failingOracle), 3600);
 
-        // Purchase should fallback to manual rate
         uint256 ethAmount = 1 ether;
-        uint256 expectedTokens = (ethAmount * 1000 * 10 ** 18) / (10 ** 18); // Manual rate
-
         vm.deal(user1, ethAmount);
         vm.startPrank(user1);
-        uint256 tokensReceived = tokenSale.purchaseWithETH{value: ethAmount}(bytes32(0));
+        vm.expectRevert("TokenSale: invalid payment token price");
+        tokenSale.purchaseWithETH{value: ethAmount}(0, bytes32(0));
         vm.stopPrank();
 
-        assertEq(tokensReceived, expectedTokens); // Should use manual rate
+        // Admin can explicitly switch to the manual rate to resume the sale
+        vm.prank(admin);
+        tokenSale.setOracleMode(address(0), false);
+
+        vm.startPrank(user1);
+        uint256 tokensReceived = tokenSale.purchaseWithETH{value: ethAmount}(0, bytes32(0));
+        vm.stopPrank();
+        assertEq(tokensReceived, 1000 * 10 ** 18); // Manual rate from setUp
     }
 
     function test_OracleStalenessCheck() public {
         MockChainlinkOracle staleOracle = new MockChainlinkOracle(8, 3000 * 10 ** 8, "ETH/USD");
-        
+
         // Make oracle stale by setting old timestamp
         vm.warp(block.timestamp + 86401); // 25 hours later
-        
+
         // Set base rate
-        MockERC20 eur = new MockERC20("Euro", "EUR");
+        MockERC20 eur = new MockERC20("Euro", "EUR", 18);
+        MockChainlinkOracle eurUsdOracle = new MockChainlinkOracle(8, 110000000, "EUR/USD"); // Fresh feed
         uint256 baseRate = 1 * 10 ** 18;
-        
+
         // Add EUR as payment token FIRST
         vm.prank(admin);
         tokenSale.addPaymentToken(address(eur), baseRate, 18);
-        
+
         vm.prank(admin);
         tokenSale.setBaseRate(address(eur), baseRate);
-        
+
         vm.prank(admin);
-        tokenSale.addPaymentToken(address(0), 1000 * 10 ** 18, 18);
+        tokenSale.configureOracle(address(eur), address(eurUsdOracle), 3600);
+
         vm.prank(admin);
         tokenSale.configureOracle(address(0), address(staleOracle), 3600); // 1 hour threshold
 
-        // Should fallback to manual rate due to staleness
+        // Fail-closed: stale price data must revert the purchase
         uint256 ethAmount = 1 ether;
         vm.deal(user1, ethAmount);
-        
+
         vm.startPrank(user1);
-        uint256 tokensReceived = tokenSale.purchaseWithETH{value: ethAmount}(bytes32(0));
+        vm.expectRevert("TokenSale: payment token price too stale");
+        tokenSale.purchaseWithETH{value: ethAmount}(0, bytes32(0));
+        vm.stopPrank();
+    }
+
+    function test_PerFeedStalenessThreshold() public {
+        // Each feed is checked against its own staleness threshold:
+        // the base feed's generous threshold must not be tightened by the
+        // payment feed's threshold (and vice versa)
+        MockERC20 eur = new MockERC20("Euro", "EUR", 18);
+        MockChainlinkOracle eurUsdOracle = new MockChainlinkOracle(8, 110000000, "EUR/USD");
+
+        uint256 baseRate = 1 * 10 ** 18;
+        vm.prank(admin);
+        tokenSale.addPaymentToken(address(eur), baseRate, 18);
+        vm.prank(admin);
+        tokenSale.setBaseRate(address(eur), baseRate);
+        vm.prank(admin);
+        tokenSale.configureOracle(address(eur), address(eurUsdOracle), 24 hours); // Slow heartbeat feed
+
+        // EUR feed updated 2 hours ago: fine for its 24h threshold
+        vm.warp(block.timestamp + 2 hours);
+
+        MockChainlinkOracle ethUsdOracle = new MockChainlinkOracle(8, 3000 * 10 ** 8, "ETH/USD"); // Fresh
+        vm.prank(admin);
+        tokenSale.configureOracle(address(0), address(ethUsdOracle), 1 hours); // Fast heartbeat feed
+
+        // Purchase succeeds: ETH feed fresh within 1h, EUR feed 2h old within 24h
+        uint256 ethAmount = 1 ether;
+        vm.deal(user1, ethAmount);
+        vm.startPrank(user1);
+        uint256 tokensReceived = tokenSale.purchaseWithETH{value: ethAmount}(0, bytes32(0));
+        vm.stopPrank();
+        assertGt(tokensReceived, 0);
+
+        // 2 more hours: ETH feed now stale for its 1h threshold, EUR still fine
+        vm.warp(block.timestamp + 2 hours);
+        vm.deal(user1, ethAmount);
+        vm.startPrank(user1);
+        vm.expectRevert("TokenSale: payment token price too stale");
+        tokenSale.purchaseWithETH{value: ethAmount}(0, bytes32(0));
+        vm.stopPrank();
+    }
+
+    function test_OraclePriceBounds() public {
+        MockERC20 eur = new MockERC20("Euro", "EUR", 18);
+        MockChainlinkOracle eurUsdOracle = new MockChainlinkOracle(8, 110000000, "EUR/USD");
+        MockChainlinkOracle ethUsdOracle = new MockChainlinkOracle(8, 3000 * 10 ** 8, "ETH/USD");
+
+        uint256 baseRate = 1 * 10 ** 18;
+        vm.prank(admin);
+        tokenSale.addPaymentToken(address(eur), baseRate, 18);
+        vm.prank(admin);
+        tokenSale.setBaseRate(address(eur), baseRate);
+        vm.prank(admin);
+        tokenSale.configureOracle(address(eur), address(eurUsdOracle), 3600);
+        vm.prank(admin);
+        tokenSale.configureOracle(address(0), address(ethUsdOracle), 3600);
+
+        // Bounds in feed decimals (8): accept ETH/USD between 1000 and 10000
+        vm.prank(admin);
+        tokenSale.setOraclePriceBounds(address(0), 1000 * 10 ** 8, 10000 * 10 ** 8);
+
+        // In-range price: purchase succeeds
+        uint256 ethAmount = 1 ether;
+        vm.deal(user1, 2 * ethAmount);
+        vm.startPrank(user1);
+        uint256 tokensReceived = tokenSale.purchaseWithETH{value: ethAmount}(0, bytes32(0));
+        vm.stopPrank();
+        assertGt(tokensReceived, 0);
+
+        // Price crashes below the bound (e.g. aggregator pinned at minAnswer): revert
+        ethUsdOracle.updateAnswer(500 * 10 ** 8);
+        vm.startPrank(user1);
+        vm.expectRevert("TokenSale: oracle price below bound");
+        tokenSale.purchaseWithETH{value: ethAmount}(0, bytes32(0));
         vm.stopPrank();
 
-        // Should use manual rate (1000 tokens per ETH)
-        assertEq(tokensReceived, 1000 * 10 ** 18);
+        // Price spikes above the bound: revert
+        ethUsdOracle.updateAnswer(20000 * 10 ** 8);
+        vm.startPrank(user1);
+        vm.expectRevert("TokenSale: oracle price above bound");
+        tokenSale.purchaseWithETH{value: ethAmount}(0, bytes32(0));
+        vm.stopPrank();
+    }
+
+    function test_SequencerUptimeFeedCheck() public {
+        MockERC20 eur = new MockERC20("Euro", "EUR", 18);
+        MockChainlinkOracle eurUsdOracle = new MockChainlinkOracle(8, 110000000, "EUR/USD");
+        MockChainlinkOracle ethUsdOracle = new MockChainlinkOracle(8, 3000 * 10 ** 8, "ETH/USD");
+        MockChainlinkOracle sequencerFeed = new MockChainlinkOracle(0, 0, "L2 Sequencer Uptime"); // 0 = up
+
+        uint256 baseRate = 1 * 10 ** 18;
+        vm.prank(admin);
+        tokenSale.addPaymentToken(address(eur), baseRate, 18);
+        vm.prank(admin);
+        tokenSale.setBaseRate(address(eur), baseRate);
+        vm.prank(admin);
+        tokenSale.configureOracle(address(eur), address(eurUsdOracle), 3600);
+        vm.prank(admin);
+        tokenSale.configureOracle(address(0), address(ethUsdOracle), 3600);
+        vm.prank(admin);
+        tokenSale.setSequencerUptimeFeed(address(sequencerFeed), 1 hours);
+
+        // Sequencer up but still within the grace period after restart: revert
+        uint256 ethAmount = 1 ether;
+        vm.deal(user1, 2 * ethAmount);
+        vm.startPrank(user1);
+        vm.expectRevert("TokenSale: sequencer grace period not over");
+        tokenSale.purchaseWithETH{value: ethAmount}(0, bytes32(0));
+        vm.stopPrank();
+
+        // After the grace period: purchase succeeds (refresh price feeds to stay non-stale)
+        vm.warp(block.timestamp + 2 hours);
+        eurUsdOracle.updateAnswer(110000000);
+        ethUsdOracle.updateAnswer(3000 * 10 ** 8);
+        vm.startPrank(user1);
+        uint256 tokensReceived = tokenSale.purchaseWithETH{value: ethAmount}(0, bytes32(0));
+        vm.stopPrank();
+        assertGt(tokensReceived, 0);
+
+        // Sequencer down: revert
+        sequencerFeed.updateAnswer(1);
+        vm.startPrank(user1);
+        vm.expectRevert("TokenSale: sequencer down");
+        tokenSale.purchaseWithETH{value: ethAmount}(0, bytes32(0));
+        vm.stopPrank();
     }
 
     // ============ Whitelist Role Tests ============
@@ -505,7 +646,7 @@ contract TokenSaleTest is Test {
     }
 
     function test_NonAdminCannotAddPaymentToken() public {
-        MockERC20 token = new MockERC20("Test Token", "TEST");
+        MockERC20 token = new MockERC20("Test Token", "TEST", 18);
         
         vm.prank(user1);
         vm.expectRevert();
@@ -661,11 +802,11 @@ contract TokenSaleTest is Test {
 
         vm.startPrank(user1);
         usdc.approve(address(tokenSale), paymentAmount);
-        uint256 tokensReceived = tokenSale.purchaseWithToken(address(usdc), paymentAmount, orderId);
+        uint256 tokensReceived = tokenSale.purchaseWithToken(address(usdc), paymentAmount, 0, orderId);
         vm.stopPrank();
 
         assertGt(tokensReceived, 0);
-        assertTrue(tokenSale.usedOrderIds(orderId));
+        assertTrue(tokenSale.usedOrderIds(user1, orderId));
     }
 
     function test_PurchaseWithoutOrderId() public {
@@ -673,30 +814,48 @@ contract TokenSaleTest is Test {
 
         vm.startPrank(user1);
         usdc.approve(address(tokenSale), paymentAmount);
-        uint256 tokensReceived = tokenSale.purchaseWithToken(address(usdc), paymentAmount, bytes32(0));
+        uint256 tokensReceived = tokenSale.purchaseWithToken(address(usdc), paymentAmount, 0, bytes32(0));
         vm.stopPrank();
 
         assertGt(tokensReceived, 0);
         // bytes32(0) should not be marked as used
-        assertFalse(tokenSale.usedOrderIds(bytes32(0)));
+        assertFalse(tokenSale.usedOrderIds(user1, bytes32(0)));
     }
 
-    function test_OrderIdCannotBeUsedTwice() public {
+    function test_OrderIdCannotBeReusedBySameBuyer() public {
         uint256 paymentAmount = 1000 * 10 ** usdc.decimals();
         bytes32 orderId = keccak256("ORDER_456");
 
         vm.startPrank(user1);
-        usdc.approve(address(tokenSale), paymentAmount);
-        tokenSale.purchaseWithToken(address(usdc), paymentAmount, orderId);
-        vm.stopPrank();
+        usdc.approve(address(tokenSale), paymentAmount * 2);
+        tokenSale.purchaseWithToken(address(usdc), paymentAmount, 0, orderId);
 
-        // Try to use the same orderId again
-        usdc.mint(user2, paymentAmount);
+        // Same buyer reusing the orderId reverts
+        vm.expectRevert("TokenSale: orderId already used");
+        tokenSale.purchaseWithToken(address(usdc), paymentAmount, 0, orderId);
+        vm.stopPrank();
+    }
+
+    function test_OrderIdIsScopedPerBuyer() public {
+        // A third party using the same orderId must not block another buyer
+        // (front-running/griefing protection)
+        uint256 paymentAmount = 1000 * 10 ** usdc.decimals();
+        bytes32 orderId = keccak256("ORDER_457");
+
         vm.startPrank(user2);
         usdc.approve(address(tokenSale), paymentAmount);
-        vm.expectRevert("TokenSale: orderId already used");
-        tokenSale.purchaseWithToken(address(usdc), paymentAmount, orderId);
+        tokenSale.purchaseWithToken(address(usdc), paymentAmount, 0, orderId);
         vm.stopPrank();
+
+        // user1 can still use the same orderId
+        vm.startPrank(user1);
+        usdc.approve(address(tokenSale), paymentAmount);
+        uint256 tokensReceived = tokenSale.purchaseWithToken(address(usdc), paymentAmount, 0, orderId);
+        vm.stopPrank();
+
+        assertGt(tokensReceived, 0);
+        assertTrue(tokenSale.usedOrderIds(user1, orderId));
+        assertTrue(tokenSale.usedOrderIds(user2, orderId));
     }
 
     function test_DifferentOrderIdsCanBeUsed() public {
@@ -706,12 +865,12 @@ contract TokenSaleTest is Test {
 
         vm.startPrank(user1);
         usdc.approve(address(tokenSale), paymentAmount * 2);
-        tokenSale.purchaseWithToken(address(usdc), paymentAmount, orderId1);
-        tokenSale.purchaseWithToken(address(usdc), paymentAmount, orderId2);
+        tokenSale.purchaseWithToken(address(usdc), paymentAmount, 0, orderId1);
+        tokenSale.purchaseWithToken(address(usdc), paymentAmount, 0, orderId2);
         vm.stopPrank();
 
-        assertTrue(tokenSale.usedOrderIds(orderId1));
-        assertTrue(tokenSale.usedOrderIds(orderId2));
+        assertTrue(tokenSale.usedOrderIds(user1, orderId1));
+        assertTrue(tokenSale.usedOrderIds(user1, orderId2));
     }
 
     function test_PurchaseWithETHAndOrderId() public {
@@ -720,27 +879,24 @@ contract TokenSaleTest is Test {
 
         vm.deal(user1, ethAmount);
         vm.startPrank(user1);
-        uint256 tokensReceived = tokenSale.purchaseWithETH{value: ethAmount}(orderId);
+        uint256 tokensReceived = tokenSale.purchaseWithETH{value: ethAmount}(0, orderId);
         vm.stopPrank();
 
         assertGt(tokensReceived, 0);
-        assertTrue(tokenSale.usedOrderIds(orderId));
+        assertTrue(tokenSale.usedOrderIds(user1, orderId));
     }
 
     function test_OrderIdCannotBeUsedTwiceWithETH() public {
         uint256 ethAmount = 1 ether;
         bytes32 orderId = keccak256("ETH_ORDER_456");
 
-        vm.deal(user1, ethAmount);
+        vm.deal(user1, 2 * ethAmount);
         vm.startPrank(user1);
-        tokenSale.purchaseWithETH{value: ethAmount}(orderId);
-        vm.stopPrank();
+        tokenSale.purchaseWithETH{value: ethAmount}(0, orderId);
 
-        // Try to use the same orderId again
-        vm.deal(user2, ethAmount);
-        vm.startPrank(user2);
+        // Same buyer reusing the orderId reverts
         vm.expectRevert("TokenSale: orderId already used");
-        tokenSale.purchaseWithETH{value: ethAmount}(orderId);
+        tokenSale.purchaseWithETH{value: ethAmount}(0, orderId);
         vm.stopPrank();
     }
 
@@ -762,7 +918,7 @@ contract TokenSaleTest is Test {
         uint256 paymentAmount = 90 * 10 ** usdcDecimals;
         vm.startPrank(user1);
         usdc.approve(address(tokenSale), paymentAmount);
-        tokenSale.purchaseWithToken(address(usdc), paymentAmount, bytes32(0));
+        tokenSale.purchaseWithToken(address(usdc), paymentAmount, 0, bytes32(0));
         vm.stopPrank();
 
         // Try to exceed cap (should fail)
@@ -771,7 +927,7 @@ contract TokenSaleTest is Test {
         vm.startPrank(user2);
         usdc.approve(address(tokenSale), excessPayment);
         vm.expectRevert("TokenSale: hard cap exceeded");
-        tokenSale.purchaseWithToken(address(usdc), excessPayment, bytes32(0));
+        tokenSale.purchaseWithToken(address(usdc), excessPayment, 0, bytes32(0));
         vm.stopPrank();
     }
 
@@ -790,7 +946,7 @@ contract TokenSaleTest is Test {
         vm.startPrank(user1);
         usdc.approve(address(tokenSale), smallPayment);
         vm.expectRevert("TokenSale: purchase below minimum");
-        tokenSale.purchaseWithToken(address(usdc), smallPayment, bytes32(0));
+        tokenSale.purchaseWithToken(address(usdc), smallPayment, 0, bytes32(0));
         vm.stopPrank();
 
         // Purchase above minimum (should succeed)
@@ -798,7 +954,7 @@ contract TokenSaleTest is Test {
         uint256 largePayment = 10 * 10 ** usdcDecimals;
         vm.startPrank(user1);
         usdc.approve(address(tokenSale), largePayment);
-        tokenSale.purchaseWithToken(address(usdc), largePayment, bytes32(0));
+        tokenSale.purchaseWithToken(address(usdc), largePayment, 0, bytes32(0));
         vm.stopPrank();
     }
 
@@ -816,7 +972,7 @@ contract TokenSaleTest is Test {
         uint256 paymentAmount = 40 * 10 ** usdcDecimals;
         vm.startPrank(user1);
         usdc.approve(address(tokenSale), paymentAmount * 2);
-        tokenSale.purchaseWithToken(address(usdc), paymentAmount, bytes32(0));
+        tokenSale.purchaseWithToken(address(usdc), paymentAmount, 0, bytes32(0));
         vm.stopPrank();
 
         // Try to exceed limit (should fail)
@@ -825,7 +981,7 @@ contract TokenSaleTest is Test {
         vm.startPrank(user1);
         usdc.approve(address(tokenSale), excessPayment);
         vm.expectRevert("TokenSale: user purchase limit exceeded");
-        tokenSale.purchaseWithToken(address(usdc), excessPayment, bytes32(0));
+        tokenSale.purchaseWithToken(address(usdc), excessPayment, 0, bytes32(0));
         vm.stopPrank();
     }
 
@@ -849,13 +1005,13 @@ contract TokenSaleTest is Test {
         vm.startPrank(user1);
         usdc.approve(address(tokenSale), paymentAmount);
         vm.expectRevert("TokenSale: user purchase limit exceeded");
-        tokenSale.purchaseWithToken(address(usdc), paymentAmount, bytes32(0));
+        tokenSale.purchaseWithToken(address(usdc), paymentAmount, 0, bytes32(0));
         vm.stopPrank();
 
         // User2 should have global limit (2,500 tokens < 5,000 global limit)
         vm.startPrank(user2);
         usdc.approve(address(tokenSale), paymentAmount);
-        tokenSale.purchaseWithToken(address(usdc), paymentAmount, bytes32(0));
+        tokenSale.purchaseWithToken(address(usdc), paymentAmount, 0, bytes32(0));
         vm.stopPrank();
     }
 
@@ -926,7 +1082,7 @@ contract TokenSaleTest is Test {
         vm.startPrank(user1);
         usdc.approve(address(tokenSale), paymentAmount);
         vm.expectRevert("TokenSale: sale not started");
-        tokenSale.purchaseWithToken(address(usdc), paymentAmount, bytes32(0));
+        tokenSale.purchaseWithToken(address(usdc), paymentAmount, 0, bytes32(0));
         vm.stopPrank();
 
         // Move time forward to start
@@ -938,7 +1094,7 @@ contract TokenSaleTest is Test {
         vm.startPrank(user1);
         usdc.approve(address(tokenSale), smallPayment);
         vm.expectRevert("TokenSale: purchase below minimum");
-        tokenSale.purchaseWithToken(address(usdc), smallPayment, bytes32(0));
+        tokenSale.purchaseWithToken(address(usdc), smallPayment, 0, bytes32(0));
         vm.stopPrank();
 
         // Purchase within all limits (should succeed)
@@ -946,7 +1102,7 @@ contract TokenSaleTest is Test {
         uint256 validPayment = 40 * 10 ** usdcDecimals;
         vm.startPrank(user1);
         usdc.approve(address(tokenSale), validPayment * 2);
-        uint256 tokensReceived = tokenSale.purchaseWithToken(address(usdc), validPayment, bytes32(0));
+        uint256 tokensReceived = tokenSale.purchaseWithToken(address(usdc), validPayment, 0, bytes32(0));
         vm.stopPrank();
 
         assertGt(tokensReceived, 0);
@@ -958,7 +1114,7 @@ contract TokenSaleTest is Test {
         vm.startPrank(user1);
         usdc.approve(address(tokenSale), excessPayment);
         vm.expectRevert("TokenSale: user purchase limit exceeded");
-        tokenSale.purchaseWithToken(address(usdc), excessPayment, bytes32(0));
+        tokenSale.purchaseWithToken(address(usdc), excessPayment, 0, bytes32(0));
         vm.stopPrank();
 
         // Move time forward past end
@@ -968,7 +1124,7 @@ contract TokenSaleTest is Test {
         vm.startPrank(user2);
         usdc.approve(address(tokenSale), validPayment);
         vm.expectRevert("TokenSale: sale ended");
-        tokenSale.purchaseWithToken(address(usdc), validPayment, bytes32(0));
+        tokenSale.purchaseWithToken(address(usdc), validPayment, 0, bytes32(0));
         vm.stopPrank();
     }
 
@@ -987,7 +1143,7 @@ contract TokenSaleTest is Test {
         vm.startPrank(user1);
         usdc.approve(address(tokenSale), paymentAmount);
         vm.expectRevert("TokenSale: sale not started");
-        tokenSale.purchaseWithToken(address(usdc), paymentAmount, bytes32(0));
+        tokenSale.purchaseWithToken(address(usdc), paymentAmount, 0, bytes32(0));
         vm.stopPrank();
 
         // Move time forward to start
@@ -995,7 +1151,7 @@ contract TokenSaleTest is Test {
 
         // Now should work
         vm.startPrank(user1);
-        tokenSale.purchaseWithToken(address(usdc), paymentAmount, bytes32(0));
+        tokenSale.purchaseWithToken(address(usdc), paymentAmount, 0, bytes32(0));
         vm.stopPrank();
 
         // Move time forward past end
@@ -1005,7 +1161,7 @@ contract TokenSaleTest is Test {
         vm.startPrank(user2);
         usdc.approve(address(tokenSale), paymentAmount);
         vm.expectRevert("TokenSale: sale ended");
-        tokenSale.purchaseWithToken(address(usdc), paymentAmount, bytes32(0));
+        tokenSale.purchaseWithToken(address(usdc), paymentAmount, 0, bytes32(0));
         vm.stopPrank();
     }
 
@@ -1040,13 +1196,13 @@ contract TokenSaleTest is Test {
         // Purchase with USDC
         vm.startPrank(user1);
         usdc.approve(address(tokenSale), paymentAmount1);
-        tokenSale.purchaseWithToken(address(usdc), paymentAmount1, bytes32(0));
+        tokenSale.purchaseWithToken(address(usdc), paymentAmount1, 0, bytes32(0));
         vm.stopPrank();
 
         // Purchase with ETH
         vm.deal(user2, paymentAmount2);
         vm.startPrank(user2);
-        tokenSale.purchaseWithETH{value: paymentAmount2}(bytes32(0));
+        tokenSale.purchaseWithETH{value: paymentAmount2}(0, bytes32(0));
         vm.stopPrank();
 
         // Check revenue by token
@@ -1068,7 +1224,7 @@ contract TokenSaleTest is Test {
         uint256 paymentAmount = 1000 * 10 ** usdc.decimals();
         vm.startPrank(user1);
         usdc.approve(address(tokenSale), paymentAmount);
-        tokenSale.purchaseWithToken(address(usdc), paymentAmount, bytes32(0));
+        tokenSale.purchaseWithToken(address(usdc), paymentAmount, 0, bytes32(0));
         vm.stopPrank();
 
         assertEq(usdc.balanceOf(newRecipient), paymentAmount);
@@ -1155,7 +1311,7 @@ contract TokenSaleTest is Test {
         
         vm.startPrank(user1);
         usdc.approve(address(tokenSale), paymentAmount);
-        uint256 tokensReceived = tokenSale.purchaseWithToken(address(usdc), paymentAmount, bytes32(0));
+        uint256 tokensReceived = tokenSale.purchaseWithToken(address(usdc), paymentAmount, 0, bytes32(0));
         vm.stopPrank();
 
         assertEq(tokenSale.getUserPurchases(user1), tokensReceived);
@@ -1167,7 +1323,7 @@ contract TokenSaleTest is Test {
         
         vm.startPrank(user1);
         usdc.approve(address(tokenSale), paymentAmount);
-        uint256 tokensReceived = tokenSale.purchaseWithToken(address(usdc), paymentAmount, bytes32(0));
+        uint256 tokensReceived = tokenSale.purchaseWithToken(address(usdc), paymentAmount, 0, bytes32(0));
         vm.stopPrank();
 
         assertEq(tokenSale.getUserPurchasesByToken(user1, address(usdc)), tokensReceived);
@@ -1208,7 +1364,7 @@ contract TokenSaleTest is Test {
     }
 
     function test_AddPaymentTokenInvalidRate() public {
-        MockERC20 token = new MockERC20("Test Token", "TEST");
+        MockERC20 token = new MockERC20("Test Token", "TEST", 18);
         
         // Try to add payment token with zero rate (should fail)
         vm.prank(admin);
@@ -1217,7 +1373,7 @@ contract TokenSaleTest is Test {
     }
 
     function test_AddPaymentTokenInvalidDecimals() public {
-        MockERC20 token = new MockERC20("Test Token", "TEST");
+        MockERC20 token = new MockERC20("Test Token", "TEST", 18);
         
         // Try to add payment token with decimals > 18 (should fail)
         vm.prank(admin);
@@ -1226,7 +1382,7 @@ contract TokenSaleTest is Test {
     }
 
     function test_ConfigureOraclePaymentTokenNotAllowed() public {
-        MockERC20 token = new MockERC20("Test Token", "TEST");
+        MockERC20 token = new MockERC20("Test Token", "TEST", 18);
         MockChainlinkOracle oracle = new MockChainlinkOracle(8, 3000 * 10 ** 8, "TEST/USD");
         
         // Try to configure oracle for token that's not added as payment token (should fail)
@@ -1250,7 +1406,7 @@ contract TokenSaleTest is Test {
     }
 
     function test_UpdatePaymentTokenRatePaymentTokenNotAllowed() public {
-        MockERC20 token = new MockERC20("Test Token", "TEST");
+        MockERC20 token = new MockERC20("Test Token", "TEST", 18);
         
         // Try to update rate for token that's not added as payment token (should fail)
         vm.prank(admin);
@@ -1259,7 +1415,7 @@ contract TokenSaleTest is Test {
     }
 
     function test_RemoveOraclePaymentTokenNotAllowed() public {
-        MockERC20 token = new MockERC20("Test Token", "TEST");
+        MockERC20 token = new MockERC20("Test Token", "TEST", 18);
         
         // Try to remove oracle for token that's not added as payment token (should fail)
         vm.prank(admin);
@@ -1268,7 +1424,7 @@ contract TokenSaleTest is Test {
     }
 
     function test_SetOracleModePaymentTokenNotAllowed() public {
-        MockERC20 token = new MockERC20("Test Token", "TEST");
+        MockERC20 token = new MockERC20("Test Token", "TEST", 18);
         
         // Try to set oracle mode for token that's not added as payment token (should fail)
         vm.prank(admin);
@@ -1290,7 +1446,7 @@ contract TokenSaleTest is Test {
     }
 
     function test_UpdateStalenessThresholdPaymentTokenNotAllowed() public {
-        MockERC20 token = new MockERC20("Test Token", "TEST");
+        MockERC20 token = new MockERC20("Test Token", "TEST", 18);
         
         // Try to update staleness threshold for token that's not added as payment token (should fail)
         vm.prank(admin);
@@ -1313,7 +1469,7 @@ contract TokenSaleTest is Test {
     }
 
     function test_SetBaseRateBasePaymentTokenNotAllowed() public {
-        MockERC20 token = new MockERC20("Test Token", "TEST");
+        MockERC20 token = new MockERC20("Test Token", "TEST", 18);
         
         // Try to set base rate for token that's not added as payment token (should fail)
         vm.prank(admin);
@@ -1328,7 +1484,7 @@ contract TokenSaleTest is Test {
         vm.startPrank(user1);
         usdc.approve(address(tokenSale), 0);
         vm.expectRevert("TokenSale: invalid payment amount");
-        tokenSale.purchaseWithToken(address(usdc), 0, bytes32(0));
+        tokenSale.purchaseWithToken(address(usdc), 0, 0, bytes32(0));
         vm.stopPrank();
     }
 
@@ -1336,7 +1492,7 @@ contract TokenSaleTest is Test {
         // Try to purchase with zero ETH (should fail)
         vm.startPrank(user1);
         vm.expectRevert("TokenSale: invalid payment amount");
-        tokenSale.purchaseWithETH{value: 0}(bytes32(0));
+        tokenSale.purchaseWithETH{value: 0}(0, bytes32(0));
         vm.stopPrank();
     }
 
@@ -1403,7 +1559,7 @@ contract TokenSaleTest is Test {
         uint256 paymentAmount = paymentForCap - 1;
         vm.startPrank(user1);
         usdc.approve(address(tokenSale), paymentAmount * 2);
-        tokenSale.purchaseWithToken(address(usdc), paymentAmount, bytes32(0));
+        tokenSale.purchaseWithToken(address(usdc), paymentAmount, 0, bytes32(0));
         vm.stopPrank();
 
         // Now purchase the remaining amount (should succeed)
@@ -1412,14 +1568,14 @@ contract TokenSaleTest is Test {
         uint256 remainingPayment = (remaining * (10 ** decimals)) / rate;
         
         vm.startPrank(user1);
-        tokenSale.purchaseWithToken(address(usdc), remainingPayment, bytes32(0));
+        tokenSale.purchaseWithToken(address(usdc), remainingPayment, 0, bytes32(0));
         vm.stopPrank();
 
         assertEq(baseToken.totalSupply(), cap);
     }
 
     function test_CalculateTokensWithOracle() public {
-        MockERC20 eur = new MockERC20("Euro", "EUR");
+        MockERC20 eur = new MockERC20("Euro", "EUR", 18);
         MockChainlinkOracle ethUsdOracle = new MockChainlinkOracle(8, 3000 * 10 ** 8, "ETH/USD");
         MockChainlinkOracle eurUsdOracle = new MockChainlinkOracle(8, 110000000, "EUR/USD");
 
@@ -1443,8 +1599,167 @@ contract TokenSaleTest is Test {
 
     function test_CalculateTokensInvalidPaymentToken() public {
         address invalidToken = address(0x999);
-        
+
         vm.expectRevert("TokenSale: payment token not allowed");
         tokenSale.calculateTokens(invalidToken, 1000 * 10 ** 18);
+    }
+
+    // ============ Security Fix Tests ============
+
+    function test_MaxPurchasePerUserNotBypassableByTransfer() public {
+        uint256 maxPurchase = 5000 * 10 ** 18;
+        vm.prank(admin);
+        tokenSale.setMaxPurchasePerUser(maxPurchase);
+
+        uint8 usdcDecimals = tokenSale.paymentTokenDecimals(address(usdc));
+        uint256 paymentAmount = 40 * 10 ** usdcDecimals; // 4,000 tokens
+
+        vm.startPrank(user1);
+        usdc.approve(address(tokenSale), paymentAmount * 2);
+        tokenSale.purchaseWithToken(address(usdc), paymentAmount, 0, bytes32(0));
+
+        // Move all tokens to another wallet: the limit must still apply
+        baseToken.transfer(user2, baseToken.balanceOf(user1));
+
+        // 20 USDC = 2,000 tokens, total purchased would be 6,000 > 5,000 limit
+        uint256 excessPayment = 20 * 10 ** usdcDecimals;
+        vm.expectRevert("TokenSale: user purchase limit exceeded");
+        tokenSale.purchaseWithToken(address(usdc), excessPayment, 0, bytes32(0));
+        vm.stopPrank();
+    }
+
+    function test_MaxPurchasePerUserNotGriefableByDusting() public {
+        uint256 maxPurchase = 5000 * 10 ** 18;
+        vm.prank(admin);
+        tokenSale.setMaxPurchasePerUser(maxPurchase);
+
+        // A third party dusts user1 with base tokens above the limit
+        baseToken.mint(user1, 10000 * 10 ** 18);
+
+        // user1 has purchased nothing through the sale, so they can still buy
+        uint8 usdcDecimals = tokenSale.paymentTokenDecimals(address(usdc));
+        uint256 paymentAmount = 40 * 10 ** usdcDecimals; // 4,000 tokens
+        vm.startPrank(user1);
+        usdc.approve(address(tokenSale), paymentAmount);
+        uint256 tokensReceived = tokenSale.purchaseWithToken(address(usdc), paymentAmount, 0, bytes32(0));
+        vm.stopPrank();
+
+        assertGt(tokensReceived, 0);
+    }
+
+    function test_SlippageProtectionMinTokensOut() public {
+        uint8 usdcDecimals = tokenSale.paymentTokenDecimals(address(usdc));
+        uint256 paymentAmount = 10 * 10 ** usdcDecimals; // 1,000 tokens at the current rate
+        uint256 expectedTokens = tokenSale.calculateTokens(address(usdc), paymentAmount);
+
+        // Rate worsens after the buyer submitted their transaction
+        vm.prank(admin);
+        tokenSale.updatePaymentTokenRate(address(usdc), 50 * 10 ** 18); // Halved
+
+        vm.startPrank(user1);
+        usdc.approve(address(tokenSale), paymentAmount * 2);
+        vm.expectRevert("TokenSale: below minTokensOut");
+        tokenSale.purchaseWithToken(address(usdc), paymentAmount, expectedTokens, bytes32(0));
+
+        // Purchase succeeds when the buyer accepts the new rate
+        uint256 tokensReceived = tokenSale.purchaseWithToken(address(usdc), paymentAmount, expectedTokens / 2, bytes32(0));
+        vm.stopPrank();
+
+        assertEq(tokensReceived, expectedTokens / 2);
+    }
+
+    function test_SlippageProtectionMinTokensOutETH() public {
+        uint256 ethAmount = 1 ether;
+        uint256 expectedTokens = tokenSale.calculateTokens(address(0), ethAmount);
+
+        vm.deal(user1, 2 * ethAmount);
+        vm.startPrank(user1);
+        vm.expectRevert("TokenSale: below minTokensOut");
+        tokenSale.purchaseWithETH{value: ethAmount}(expectedTokens + 1, bytes32(0));
+
+        uint256 tokensReceived = tokenSale.purchaseWithETH{value: ethAmount}(expectedTokens, bytes32(0));
+        vm.stopPrank();
+
+        assertEq(tokensReceived, expectedTokens);
+    }
+
+    function test_RemovePaymentTokenClearsConfiguration() public {
+        MockChainlinkOracle oracle = new MockChainlinkOracle(8, 100000000, "USDC/USD");
+        vm.prank(admin);
+        tokenSale.configureOracle(address(usdc), address(oracle), 3600);
+        vm.prank(admin);
+        tokenSale.setOraclePriceBounds(address(usdc), 90000000, 110000000);
+
+        vm.prank(admin);
+        tokenSale.removePaymentToken(address(usdc));
+
+        // All configuration is cleared so a re-add starts clean
+        assertEq(tokenSale.paymentTokenRates(address(usdc)), 0);
+        assertEq(tokenSale.paymentTokenDecimals(address(usdc)), 0);
+        assertEq(tokenSale.paymentTokenOracles(address(usdc)), address(0));
+        assertFalse(tokenSale.useOracleForToken(address(usdc)));
+        assertEq(tokenSale.oracleStalenessThreshold(address(usdc)), 0);
+        assertEq(tokenSale.oracleMinPrice(address(usdc)), 0);
+        assertEq(tokenSale.oracleMaxPrice(address(usdc)), 0);
+
+        // Re-add uses the fresh manual rate, not the stale oracle configuration
+        vm.prank(admin);
+        tokenSale.addPaymentToken(address(usdc), 200 * 10 ** 18, 6);
+        assertFalse(tokenSale.useOracleForToken(address(usdc)));
+
+        uint256 paymentAmount = 10 * 10 ** 6;
+        uint256 calculated = tokenSale.calculateTokens(address(usdc), paymentAmount);
+        assertEq(calculated, (paymentAmount * 200 * 10 ** 18) / 10 ** 6);
+    }
+
+    function test_CannotRemoveActiveBasePaymentToken() public {
+        vm.prank(admin);
+        tokenSale.setBaseRate(address(usdc), 1 * 10 ** 18);
+
+        vm.prank(admin);
+        vm.expectRevert("TokenSale: cannot remove base payment token");
+        tokenSale.removePaymentToken(address(usdc));
+
+        // After switching the base to another allowed token, removal works
+        vm.prank(admin);
+        tokenSale.updateBasePaymentToken(address(0));
+        vm.prank(admin);
+        tokenSale.removePaymentToken(address(usdc));
+        assertFalse(tokenSale.allowedPaymentTokens(address(usdc)));
+    }
+
+    function test_RemoveOracleClearsThresholdAndBounds() public {
+        MockChainlinkOracle oracle = new MockChainlinkOracle(8, 3000 * 10 ** 8, "ETH/USD");
+        vm.prank(admin);
+        tokenSale.configureOracle(address(0), address(oracle), 3600);
+        vm.prank(admin);
+        tokenSale.setOraclePriceBounds(address(0), 1, 10 ** 30);
+
+        vm.prank(admin);
+        tokenSale.removeOracle(address(0));
+
+        assertEq(tokenSale.oracleStalenessThreshold(address(0)), 0);
+        assertEq(tokenSale.oracleMinPrice(address(0)), 0);
+        assertEq(tokenSale.oracleMaxPrice(address(0)), 0);
+    }
+
+    function test_AddPaymentTokenDecimalsMismatchReverts() public {
+        MockERC20 token = new MockERC20("Test Token", "TEST", 18);
+
+        vm.prank(admin);
+        vm.expectRevert("TokenSale: decimals mismatch");
+        tokenSale.addPaymentToken(address(token), 100 * 10 ** 18, 6);
+    }
+
+    function test_AddPaymentTokenETHRequires18Decimals() public {
+        vm.prank(admin);
+        vm.expectRevert("TokenSale: ETH decimals must be 18");
+        tokenSale.addPaymentToken(address(0), 100 * 10 ** 18, 6);
+    }
+
+    function test_InvalidOraclePriceBounds() public {
+        vm.prank(admin);
+        vm.expectRevert("TokenSale: invalid price bounds");
+        tokenSale.setOraclePriceBounds(address(usdc), 100, 50);
     }
 }

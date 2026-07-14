@@ -110,9 +110,6 @@ cast call $TOKEN_SALE_ADDRESS "getUserPurchasesByToken(address,address)(uint256)
 # Total tokens sold
 cast call $TOKEN_SALE_ADDRESS "totalSales()(uint256)" --rpc-url $RPC_URL
 
-# Total revenue (in base token units)
-cast call $TOKEN_SALE_ADDRESS "totalRevenue()(uint256)" --rpc-url $RPC_URL
-
 # Revenue by payment token
 cast call $TOKEN_SALE_ADDRESS "revenueByToken(address)(uint256)" <TOKEN_ADDRESS> --rpc-url $RPC_URL
 ```
@@ -372,8 +369,8 @@ cast send $TOKEN_SALE_ADDRESS "updateBasePaymentToken(address)" <NEW_BASE_PAYMEN
 
 ### Purchase Tokens with ERC20 Token
 ```bash
-cast send $TOKEN_SALE_ADDRESS "purchaseWithToken(address,uint256,bytes32)" \
-  <TOKEN_ADDRESS> <AMOUNT> <ORDER_ID> \
+cast send $TOKEN_SALE_ADDRESS "purchaseWithToken(address,uint256,uint256,bytes32)" \
+  <TOKEN_ADDRESS> <AMOUNT> <MIN_TOKENS_OUT> <ORDER_ID> \
   --private-key $PRIVATE_KEY --rpc-url $RPC_URL
 ```
 
@@ -381,16 +378,18 @@ cast send $TOKEN_SALE_ADDRESS "purchaseWithToken(address,uint256,bytes32)" \
 ```bash
 # Purchase with 100 USDC (6 decimals = 100000000)
 ORDER_ID=$(cast keccak "order-123")
-cast send $TOKEN_SALE_ADDRESS "purchaseWithToken(address,uint256,bytes32)" \
-  <USDC_ADDRESS> 100000000 $ORDER_ID \
+# MIN_TOKENS_OUT protects against rate changes (slippage); use the expected
+# output from calculateTokens, or 0 to accept any rate
+cast send $TOKEN_SALE_ADDRESS "purchaseWithToken(address,uint256,uint256,bytes32)" \
+  <USDC_ADDRESS> 100000000 <MIN_TOKENS_OUT> $ORDER_ID \
   --private-key $PRIVATE_KEY --rpc-url $RPC_URL
 ```
 
 **Example (without order ID):**
 ```bash
 # Use zero bytes32 for no order ID
-cast send $TOKEN_SALE_ADDRESS "purchaseWithToken(address,uint256,bytes32)" \
-  <USDC_ADDRESS> 100000000 0x0000000000000000000000000000000000000000000000000000000000000000 \
+cast send $TOKEN_SALE_ADDRESS "purchaseWithToken(address,uint256,uint256,bytes32)" \
+  <USDC_ADDRESS> 100000000 0 0x0000000000000000000000000000000000000000000000000000000000000000 \
   --private-key $PRIVATE_KEY --rpc-url $RPC_URL
 ```
 
@@ -401,17 +400,17 @@ cast send <TOKEN_ADDRESS> "approve(address,uint256)" $TOKEN_SALE_ADDRESS <AMOUNT
 
 ### Purchase Tokens with ETH
 ```bash
-cast send $TOKEN_SALE_ADDRESS "purchaseWithETH(bytes32)" <ORDER_ID> --value <AMOUNT_IN_WEI> --private-key $PRIVATE_KEY --rpc-url $RPC_URL
+cast send $TOKEN_SALE_ADDRESS "purchaseWithETH(uint256,bytes32)" <MIN_TOKENS_OUT> <ORDER_ID> --value <AMOUNT_IN_WEI> --private-key $PRIVATE_KEY --rpc-url $RPC_URL
 ```
 
 **Example:**
 ```bash
 # Purchase with 0.1 ETH (100000000000000000 wei) without order ID
-cast send $TOKEN_SALE_ADDRESS "purchaseWithETH(bytes32)" 0x0000000000000000000000000000000000000000000000000000000000000000 --value 100000000000000000 --private-key $PRIVATE_KEY --rpc-url $RPC_URL
+cast send $TOKEN_SALE_ADDRESS "purchaseWithETH(uint256,bytes32)" 0 0x0000000000000000000000000000000000000000000000000000000000000000 --value 100000000000000000 --private-key $PRIVATE_KEY --rpc-url $RPC_URL
 
 # Purchase with 0.1 ETH with order ID
 ORDER_ID=$(cast keccak "eth-order-456")
-cast send $TOKEN_SALE_ADDRESS "purchaseWithETH(bytes32)" $ORDER_ID --value 100000000000000000 --private-key $PRIVATE_KEY --rpc-url $RPC_URL
+cast send $TOKEN_SALE_ADDRESS "purchaseWithETH(uint256,bytes32)" <MIN_TOKENS_OUT> $ORDER_ID --value 100000000000000000 --private-key $PRIVATE_KEY --rpc-url $RPC_URL
 ```
 
 ---
@@ -483,8 +482,8 @@ cast call $TOKEN_SALE_ADDRESS "whitelist(address)(bool)" $BUYER --rpc-url $RPC_U
 
 # 9. Purchase tokens with ETH (as buyer, requires buyer's private key)
 BUYER_PRIVATE_KEY=0x59c6995e998f97a5a0044966f0945389ac9e75b579d0e2e7e5b1e7b2e2b2e2b2
-cast send $TOKEN_SALE_ADDRESS "purchaseWithETH(bytes32)" \
-  0x0000000000000000000000000000000000000000000000000000000000000000 \
+cast send $TOKEN_SALE_ADDRESS "purchaseWithETH(uint256,bytes32)" \
+  0 0x0000000000000000000000000000000000000000000000000000000000000000 \
   --value 100000000000000000 --private-key $BUYER_PRIVATE_KEY --rpc-url $RPC_URL
 
 # 10. Check buyer's purchases
@@ -494,7 +493,6 @@ cast call $TOKEN_SALE_ADDRESS "getUserPurchasesByToken(address,address)(uint256)
 
 # 11. Check total sales
 cast call $TOKEN_SALE_ADDRESS "totalSales()(uint256)" --rpc-url $RPC_URL
-cast call $TOKEN_SALE_ADDRESS "totalRevenue()(uint256)" --rpc-url $RPC_URL
 
 # 12. Check buyer's token balance
 cast call $BASE_TOKEN_ADDRESS "balanceOf(address)(uint256)" $BUYER --rpc-url $RPC_URL

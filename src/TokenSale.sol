@@ -2,10 +2,11 @@
 pragma solidity 0.8.27;
 
 import {AccessControlUpgradeable} from "@openzeppelin/contracts-upgradeable/access/AccessControlUpgradeable.sol";
-import {ReentrancyGuardUpgradeable} from "./ReentrancyGuardUpgradeable.sol";
+import {ReentrancyGuardTransient} from "@openzeppelin/contracts/utils/ReentrancyGuardTransient.sol";
 import {PausableUpgradeable} from "@openzeppelin/contracts-upgradeable/utils/PausableUpgradeable.sol";
 import {Initializable} from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {AggregatorV3Interface} from "@chainlink/contracts/src/v0.8/shared/interfaces/AggregatorV3Interface.sol";
 
@@ -20,26 +21,26 @@ interface IERC20Mintable {
 /**
  * @title TokenSale
  * @dev Token sale contract where users can pay with specified tokens (or ETH) to receive newly minted base tokens
+ * @dev Uses ReentrancyGuardTransient (EIP-1153); deploy only on chains with Cancun support
  */
-contract TokenSale is Initializable, AccessControlUpgradeable, ReentrancyGuardUpgradeable, PausableUpgradeable {
+contract TokenSale is Initializable, AccessControlUpgradeable, ReentrancyGuardTransient, PausableUpgradeable {
     using SafeERC20 for IERC20;
 
     bytes32 public constant ADMIN_ROLE = keccak256("ADMIN_ROLE");
-    bytes32 public constant MINTER_ROLE = keccak256("MINTER_ROLE");
     bytes32 public constant WHITELIST_ROLE = keccak256("WHITELIST_ROLE");
 
     // Base token being sold (must have mint function)
     address public baseToken;
-    
+
     // Payment recipient (where payments are forwarded)
     address public paymentRecipient;
-    
+
     // Optional whitelist requirement
     bool public requireWhitelist;
-    
+
     // Whitelist management
     mapping(address => bool) public whitelist;
-    
+
     // Payment token configuration
     // paymentToken => tokensPerPayment (how many base tokens per 1 unit of payment token)
     // For ETH, use address(0) as the key
@@ -50,33 +51,43 @@ contract TokenSale is Initializable, AccessControlUpgradeable, ReentrancyGuardUp
     mapping(address => uint256) public paymentTokenRates;
     mapping(address => uint8) public paymentTokenDecimals; // Store decimals for each payment token
     mapping(address => bool) public allowedPaymentTokens;
-    
+
     // Oracle configuration for dynamic pricing
     mapping(address => address) public paymentTokenOracles; // paymentToken => Chainlink oracle address
     mapping(address => bool) public useOracleForToken; // paymentToken => whether to use oracle
     mapping(address => uint256) public oracleStalenessThreshold; // paymentToken => max seconds for price staleness
     uint256 public defaultStalenessThreshold; // Default staleness threshold (24 hours)
-    
+
+    // Optional sanity bounds for oracle answers, expressed in the feed's own decimals (0 = disabled).
+    // Protects against a Chainlink aggregator pinned at its built-in minAnswer/maxAnswer circuit breaker.
+    mapping(address => uint256) public oracleMinPrice; // paymentToken => minimum acceptable oracle answer
+    mapping(address => uint256) public oracleMaxPrice; // paymentToken => maximum acceptable oracle answer
+
+    // Optional L2 sequencer uptime feed (required when deploying to L2s like Arbitrum/Optimism/Base)
+    address public sequencerUptimeFeed; // address(0) = no sequencer check (L1)
+    uint256 public sequencerGracePeriod; // Seconds the sequencer must be back up before prices are trusted
+
     // Base rate configuration - all payment rates derive from this
     address public basePaymentToken; // Base payment token address (e.g., EUR token, or address(0) for ETH)
     uint256 public baseRate; // Base tokens per base payment token (18 decimals) - e.g., 1 * 10^18 means 1 token = 1 base payment token
-    
+
     // Sale statistics
     mapping(address => uint256) public totalPurchased; // Total base tokens purchased per user
     mapping(address => mapping(address => uint256)) public purchasedByToken; // User => PaymentToken => Amount purchased
     uint256 public totalSales; // Total base tokens sold
-    uint256 public totalRevenue; // Total revenue (in base token units for tracking)
     mapping(address => uint256) public revenueByToken; // PaymentToken => Total revenue in that token
-    
+
     // Order ID tracking (optional, bytes32(0) means no orderId)
-    mapping(bytes32 => bool) public usedOrderIds; // Track used order IDs to prevent duplicates
-    
+    // Scoped per buyer so a third party cannot front-run and burn someone else's orderId.
+    // Off-chain systems reconciling orders MUST verify buyer and amount from the event, not just the orderId.
+    mapping(address => mapping(bytes32 => bool)) public usedOrderIds; // buyer => orderId => used
+
     // Sale limits and constraints
     uint256 public hardCap; // Maximum total tokens that can be sold (0 = unlimited)
     uint256 public minPurchaseAmount; // Minimum tokens that must be purchased per transaction (0 = no minimum)
     uint256 public maxPurchasePerUser; // Maximum tokens a single user can purchase (0 = unlimited)
     mapping(address => uint256) public maxPurchasePerUserMapping; // Per-user max purchase override (0 = use global)
-    
+
     // Time-based sale windows
     uint256 public saleStartTime; // Sale start timestamp (0 = no start time restriction)
     uint256 public saleEndTime; // Sale end timestamp (0 = no end time restriction)
@@ -101,6 +112,8 @@ contract TokenSale is Initializable, AccessControlUpgradeable, ReentrancyGuardUp
     event OracleModeUpdated(address indexed paymentToken, bool useOracle);
     event StalenessThresholdUpdated(address indexed paymentToken, uint256 newThreshold);
     event DefaultStalenessThresholdUpdated(uint256 newThreshold);
+    event OraclePriceBoundsUpdated(address indexed paymentToken, uint256 minPrice, uint256 maxPrice);
+    event SequencerUptimeFeedUpdated(address indexed feed, uint256 gracePeriod);
     event BaseRateConfigured(address indexed basePaymentToken, uint256 baseRate);
     event BaseRateUpdated(uint256 newBaseRate);
     event BasePaymentTokenUpdated(address indexed newBasePaymentToken);
@@ -129,7 +142,6 @@ contract TokenSale is Initializable, AccessControlUpgradeable, ReentrancyGuardUp
         address _admin
     ) public initializer {
         __AccessControl_init();
-        __ReentrancyGuard_init();
         __Pausable_init();
 
         require(_baseToken != address(0), "TokenSale: invalid base token");
@@ -140,7 +152,7 @@ contract TokenSale is Initializable, AccessControlUpgradeable, ReentrancyGuardUp
         paymentRecipient = _paymentRecipient;
         requireWhitelist = false; // Whitelist optional by default
         defaultStalenessThreshold = 24 hours; // Default 24 hours staleness threshold
-        
+
         // Initialize sale limits (all 0 = unlimited/no restrictions)
         hardCap = 0; // 0 = unlimited
         minPurchaseAmount = 0; // 0 = no minimum
@@ -160,7 +172,8 @@ contract TokenSale is Initializable, AccessControlUpgradeable, ReentrancyGuardUp
      * @dev Add a payment token with its rate
      * @param paymentToken Address of the payment token (address(0) for ETH)
      * @param tokensPerPayment How many base tokens (18 decimals) per 1 unit of payment token
-     * @param paymentTokenDecimals_ Decimals of the payment token (18 for ETH)
+     * @param paymentTokenDecimals_ Decimals of the payment token (18 for ETH).
+     *                        Verified against the token's own decimals() when the token exposes it.
      *                        Example: If 1 USDC (6 decimals) = 100 base tokens (18 decimals)
      *                        Then tokensPerPayment = 100 * 10^18, paymentTokenDecimals_ = 6
      *                        Calculation: (paymentAmount * tokensPerPayment) / 10^paymentTokenDecimals_
@@ -168,6 +181,15 @@ contract TokenSale is Initializable, AccessControlUpgradeable, ReentrancyGuardUp
     function addPaymentToken(address paymentToken, uint256 tokensPerPayment, uint8 paymentTokenDecimals_) external onlyRole(ADMIN_ROLE) {
         require(tokensPerPayment > 0, "TokenSale: invalid rate");
         require(paymentTokenDecimals_ <= 18, "TokenSale: invalid decimals");
+        if (paymentToken == address(0)) {
+            require(paymentTokenDecimals_ == 18, "TokenSale: ETH decimals must be 18");
+        } else {
+            try IERC20Metadata(paymentToken).decimals() returns (uint8 actualDecimals) {
+                require(actualDecimals == paymentTokenDecimals_, "TokenSale: decimals mismatch");
+            } catch {
+                // Token does not expose decimals(); accept the admin-supplied value
+            }
+        }
         allowedPaymentTokens[paymentToken] = true;
         paymentTokenRates[paymentToken] = tokensPerPayment;
         paymentTokenDecimals[paymentToken] = paymentTokenDecimals_;
@@ -175,13 +197,23 @@ contract TokenSale is Initializable, AccessControlUpgradeable, ReentrancyGuardUp
     }
 
     /**
-     * @dev Remove a payment token
+     * @dev Remove a payment token and all of its associated configuration
+     * @notice Clears rate, decimals, oracle settings and price bounds so a later re-add
+     *         starts from a clean slate instead of resurrecting stale oracle configuration.
+     * @notice The active base payment token cannot be removed; switch the base first.
      * @param paymentToken Address of the payment token to remove
      */
     function removePaymentToken(address paymentToken) external onlyRole(ADMIN_ROLE) {
         require(allowedPaymentTokens[paymentToken], "TokenSale: token not allowed");
+        require(paymentToken != basePaymentToken || baseRate == 0, "TokenSale: cannot remove base payment token");
         allowedPaymentTokens[paymentToken] = false;
-        paymentTokenRates[paymentToken] = 0;
+        delete paymentTokenRates[paymentToken];
+        delete paymentTokenDecimals[paymentToken];
+        delete paymentTokenOracles[paymentToken];
+        delete useOracleForToken[paymentToken];
+        delete oracleStalenessThreshold[paymentToken];
+        delete oracleMinPrice[paymentToken];
+        delete oracleMaxPrice[paymentToken];
         emit PaymentTokenRemoved(paymentToken);
     }
 
@@ -268,7 +300,8 @@ contract TokenSale is Initializable, AccessControlUpgradeable, ReentrancyGuardUp
      *         - Result: 1 ETH = 3000/1.10 = 2727.27 tokens
      * @param paymentToken Address of the payment token (address(0) for ETH)
      * @param oracle Address of the Chainlink price feed oracle (e.g., ETH/USD, EUR/USD, BTC/USD)
-     * @param stalenessThreshold Maximum seconds before price is considered stale (0 uses default of 24 hours)
+     * @param stalenessThreshold Maximum seconds before price is considered stale (0 uses default of 24 hours).
+     *                           Set per feed: each feed's own threshold is enforced (match the feed's heartbeat).
      */
     function configureOracle(
         address paymentToken,
@@ -277,7 +310,7 @@ contract TokenSale is Initializable, AccessControlUpgradeable, ReentrancyGuardUp
     ) external onlyRole(ADMIN_ROLE) {
         require(allowedPaymentTokens[paymentToken], "TokenSale: payment token not allowed");
         require(oracle != address(0), "TokenSale: invalid oracle address");
-        
+
         // Verify oracle is valid by checking it has the required interface
         try AggregatorV3Interface(oracle).decimals() returns (uint8) {
             // Oracle is valid
@@ -289,7 +322,7 @@ contract TokenSale is Initializable, AccessControlUpgradeable, ReentrancyGuardUp
         useOracleForToken[paymentToken] = true;
         uint256 threshold = stalenessThreshold > 0 ? stalenessThreshold : defaultStalenessThreshold;
         oracleStalenessThreshold[paymentToken] = threshold;
-        
+
         emit OracleConfigured(paymentToken, oracle, threshold);
     }
 
@@ -301,6 +334,9 @@ contract TokenSale is Initializable, AccessControlUpgradeable, ReentrancyGuardUp
         require(allowedPaymentTokens[paymentToken], "TokenSale: payment token not allowed");
         useOracleForToken[paymentToken] = false;
         paymentTokenOracles[paymentToken] = address(0);
+        delete oracleStalenessThreshold[paymentToken];
+        delete oracleMinPrice[paymentToken];
+        delete oracleMaxPrice[paymentToken];
         emit OracleRemoved(paymentToken);
     }
 
@@ -340,6 +376,43 @@ contract TokenSale is Initializable, AccessControlUpgradeable, ReentrancyGuardUp
         emit DefaultStalenessThresholdUpdated(newThreshold);
     }
 
+    /**
+     * @dev Set sanity bounds for a payment token's oracle answer (0 = bound disabled)
+     * @notice Bounds are expressed in the oracle feed's own decimals.
+     * @notice Protects against a Chainlink aggregator pinned at its built-in minAnswer/maxAnswer
+     *         circuit breaker during extreme market moves (e.g. LUNA-style crashes).
+     * @param paymentToken Address of the payment token the oracle is configured for
+     * @param minPrice Minimum acceptable oracle answer (0 = no lower bound)
+     * @param maxPrice Maximum acceptable oracle answer (0 = no upper bound)
+     */
+    function setOraclePriceBounds(address paymentToken, uint256 minPrice, uint256 maxPrice) external onlyRole(ADMIN_ROLE) {
+        require(allowedPaymentTokens[paymentToken], "TokenSale: payment token not allowed");
+        require(maxPrice == 0 || minPrice < maxPrice, "TokenSale: invalid price bounds");
+        oracleMinPrice[paymentToken] = minPrice;
+        oracleMaxPrice[paymentToken] = maxPrice;
+        emit OraclePriceBoundsUpdated(paymentToken, minPrice, maxPrice);
+    }
+
+    /**
+     * @dev Configure the L2 sequencer uptime feed (address(0) disables the check)
+     * @notice Required when deploying to an L2 (Arbitrum/Optimism/Base). Purchases priced via
+     *         oracles revert while the sequencer is down or within the grace period after restart.
+     * @param feed Chainlink sequencer uptime feed address (address(0) for L1 deployments)
+     * @param gracePeriod Seconds the sequencer must be back up before oracle prices are trusted
+     */
+    function setSequencerUptimeFeed(address feed, uint256 gracePeriod) external onlyRole(ADMIN_ROLE) {
+        if (feed != address(0)) {
+            try AggregatorV3Interface(feed).decimals() returns (uint8) {
+                // Feed is valid
+            } catch {
+                revert("TokenSale: invalid sequencer feed");
+            }
+        }
+        sequencerUptimeFeed = feed;
+        sequencerGracePeriod = gracePeriod;
+        emit SequencerUptimeFeedUpdated(feed, gracePeriod);
+    }
+
     // ============ Base Rate Configuration ============
 
     /**
@@ -353,12 +426,7 @@ contract TokenSale is Initializable, AccessControlUpgradeable, ReentrancyGuardUp
      */
     function setBaseRate(address _basePaymentToken, uint256 _baseRate) external onlyRole(ADMIN_ROLE) {
         require(_baseRate > 0, "TokenSale: invalid base rate");
-        require(_basePaymentToken != address(0) || allowedPaymentTokens[address(0)], "TokenSale: base payment token not allowed");
-        
-        // If it's not ETH (address(0)), verify it's an allowed payment token
-        if (_basePaymentToken != address(0)) {
-            require(allowedPaymentTokens[_basePaymentToken], "TokenSale: base payment token not allowed");
-        }
+        require(allowedPaymentTokens[_basePaymentToken], "TokenSale: base payment token not allowed");
 
         basePaymentToken = _basePaymentToken;
         baseRate = _baseRate;
@@ -381,12 +449,7 @@ contract TokenSale is Initializable, AccessControlUpgradeable, ReentrancyGuardUp
      * @param newBasePaymentToken New base payment token address (must be an allowed payment token)
      */
     function updateBasePaymentToken(address newBasePaymentToken) external onlyRole(ADMIN_ROLE) {
-        require(newBasePaymentToken != address(0) || allowedPaymentTokens[address(0)], "TokenSale: invalid base payment token");
-        
-        // If it's not ETH, verify it's an allowed payment token
-        if (newBasePaymentToken != address(0)) {
-            require(allowedPaymentTokens[newBasePaymentToken], "TokenSale: base payment token not allowed");
-        }
+        require(allowedPaymentTokens[newBasePaymentToken], "TokenSale: base payment token not allowed");
 
         basePaymentToken = newBasePaymentToken;
         emit BasePaymentTokenUpdated(newBasePaymentToken);
@@ -483,14 +546,14 @@ contract TokenSale is Initializable, AccessControlUpgradeable, ReentrancyGuardUp
      */
     function emergencyWithdraw(address token, address recipient, uint256 amount) external onlyRole(ADMIN_ROLE) {
         require(recipient != address(0), "TokenSale: invalid recipient");
-        
+
         if (token == address(0)) {
             // Withdraw ETH
             uint256 balance = address(this).balance;
             uint256 withdrawAmount = amount == 0 ? balance : amount;
             require(withdrawAmount > 0, "TokenSale: no ETH to withdraw");
             require(withdrawAmount <= balance, "TokenSale: insufficient ETH balance");
-            
+
             (bool sent, ) = recipient.call{value: withdrawAmount}("");
             require(sent, "TokenSale: ETH withdrawal failed");
             emit EmergencyWithdrawal(address(0), recipient, withdrawAmount);
@@ -500,7 +563,7 @@ contract TokenSale is Initializable, AccessControlUpgradeable, ReentrancyGuardUp
             uint256 withdrawAmount = amount == 0 ? balance : amount;
             require(withdrawAmount > 0, "TokenSale: no tokens to withdraw");
             require(withdrawAmount <= balance, "TokenSale: insufficient token balance");
-            
+
             IERC20(token).safeTransfer(recipient, withdrawAmount);
             emit EmergencyWithdrawal(token, recipient, withdrawAmount);
         }
@@ -510,39 +573,34 @@ contract TokenSale is Initializable, AccessControlUpgradeable, ReentrancyGuardUp
 
     /**
      * @dev Get the current rate for a payment token (from base rate, oracle, or manual rate)
+     * @notice Fail-closed: when oracle mode is enabled for a token, an oracle failure
+     *         (stale price, invalid answer, out-of-bounds price, sequencer down) reverts the
+     *         purchase instead of silently falling back to a possibly outdated manual rate.
+     *         To sell at the manual rate the admin must explicitly call setOracleMode(token, false).
      * @param paymentToken Address of the payment token (address(0) for ETH)
      * @return rate Rate in base tokens (18 decimals) per 1 unit of payment token
      * @return decimals Decimals of the payment token
      */
     function getRate(address paymentToken) internal view returns (uint256 rate, uint8 decimals) {
         decimals = paymentTokenDecimals[paymentToken];
-        
+
         // If this is the base payment token, use base rate directly (no oracle needed)
         if (paymentToken == basePaymentToken && baseRate > 0) {
-            rate = baseRate;
-            return (rate, decimals);
+            return (baseRate, decimals);
         }
-        
-        // Check if oracle should be used for this payment token
+
+        // Oracle mode: derive the rate from the configured feeds, reverting on any failure
         if (useOracleForToken[paymentToken] && paymentTokenOracles[paymentToken] != address(0)) {
-            try this._getOracleRateInternal(paymentToken) returns (uint256 oracleRate) {
-                // Oracle succeeded, use oracle rate
-                rate = oracleRate;
-                return (rate, decimals);
-            } catch {
-                // Oracle failed, fall back to manual rate
-                rate = paymentTokenRates[paymentToken];
-                return (rate, decimals);
-            }
+            return (_getOracleRate(paymentToken), decimals);
         }
-        
-        // Use manual rate (if set)
+
+        // Manual mode
         rate = paymentTokenRates[paymentToken];
         return (rate, decimals);
     }
 
     /**
-     * @dev Get rate from Chainlink oracle with staleness check (internal via external for try-catch)
+     * @dev Get rate from Chainlink oracles with staleness, bounds and sequencer checks
      * @notice Derives rate from base rate and base payment token
      * @notice Requires oracles for both paymentToken and basePaymentToken (both relative to USD or same quote currency)
      * @notice Formula: rate = baseRate * (paymentTokenPrice / basePaymentTokenPrice)
@@ -552,67 +610,82 @@ contract TokenSale is Initializable, AccessControlUpgradeable, ReentrancyGuardUp
      * @param paymentToken Address of the payment token
      * @return rate Rate in base tokens (18 decimals) per 1 unit of payment token
      */
-    function _getOracleRateInternal(address paymentToken) external view returns (uint256 rate) {
+    function _getOracleRate(address paymentToken) internal view returns (uint256 rate) {
+        _checkSequencerUp();
+
         // Validate base rate configuration
         require(baseRate > 0, "TokenSale: base rate not set");
         // Note: basePaymentToken can be address(0) for ETH, which is valid
-        
+
         // Get payment token oracle
         address paymentTokenOracle = paymentTokenOracles[paymentToken];
         require(paymentTokenOracle != address(0), "TokenSale: payment token oracle not configured");
-        
+
         // Get base payment token oracle (required to convert paymentToken to basePaymentToken)
         address basePaymentTokenOracle = paymentTokenOracles[basePaymentToken];
         require(basePaymentTokenOracle != address(0), "TokenSale: base payment token oracle not configured");
-        
-        // Get payment token price (e.g., ETH/USD)
-        AggregatorV3Interface paymentTokenPriceFeed = AggregatorV3Interface(paymentTokenOracle);
-        (, int256 paymentTokenPrice, , uint256 paymentUpdatedAt, ) = paymentTokenPriceFeed.latestRoundData();
-        
-        // Validate payment token price data
-        require(paymentTokenPrice > 0, "TokenSale: invalid payment token price");
-        require(paymentUpdatedAt > 0, "TokenSale: payment token price not updated");
-        
-        // Get base payment token price (e.g., EUR/USD)
-        AggregatorV3Interface basePaymentTokenPriceFeed = AggregatorV3Interface(basePaymentTokenOracle);
-        (, int256 basePaymentTokenPrice, , uint256 baseUpdatedAt, ) = basePaymentTokenPriceFeed.latestRoundData();
-        
-        // Validate base payment token price data
-        require(basePaymentTokenPrice > 0, "TokenSale: invalid base payment token price");
-        require(baseUpdatedAt > 0, "TokenSale: base payment token price not updated");
-        
-        // Check staleness for both oracles
-        uint256 stalenessThreshold = oracleStalenessThreshold[paymentToken];
-        if (stalenessThreshold == 0) stalenessThreshold = defaultStalenessThreshold;
-        require(block.timestamp - paymentUpdatedAt <= stalenessThreshold, "TokenSale: payment token price too stale");
-        require(block.timestamp - baseUpdatedAt <= stalenessThreshold, "TokenSale: base payment token price too stale");
-        
-        // Get decimals and normalize prices to 18 decimals
-        uint8 paymentTokenOracleDecimals = paymentTokenPriceFeed.decimals();
-        uint8 basePaymentTokenOracleDecimals = basePaymentTokenPriceFeed.decimals();
-        
-        // Normalize both prices to 18 decimals
-        uint256 normalizedPaymentPrice = uint256(paymentTokenPrice);
-        if (paymentTokenOracleDecimals < 18) {
-            normalizedPaymentPrice *= (10 ** (18 - paymentTokenOracleDecimals));
-        } else if (paymentTokenOracleDecimals > 18) {
-            normalizedPaymentPrice /= (10 ** (paymentTokenOracleDecimals - 18));
-        }
-        
-        uint256 normalizedBasePrice = uint256(basePaymentTokenPrice);
-        if (basePaymentTokenOracleDecimals < 18) {
-            normalizedBasePrice *= (10 ** (18 - basePaymentTokenOracleDecimals));
-        } else if (basePaymentTokenOracleDecimals > 18) {
-            normalizedBasePrice /= (10 ** (basePaymentTokenOracleDecimals - 18));
-        }
-        
+
+        // Read and validate both prices, normalized to 18 decimals.
+        // Each feed is checked against its own staleness threshold and price bounds.
+        uint256 normalizedPaymentPrice = _readOraclePrice(paymentToken, paymentTokenOracle, true);
+        uint256 normalizedBasePrice = _readOraclePrice(basePaymentToken, basePaymentTokenOracle, false);
+
         // Calculate rate: baseRate * (paymentTokenPrice / basePaymentTokenPrice)
         // This gives us: tokens per paymentToken = (tokens per basePaymentToken) * (paymentToken / basePaymentToken)
         rate = (baseRate * normalizedPaymentPrice) / normalizedBasePrice;
-        
+
         require(rate > 0, "TokenSale: invalid rate calculation");
-        
+
         return rate;
+    }
+
+    /**
+     * @dev Read a Chainlink price feed, validating answer, staleness and configured bounds
+     * @param token Payment token key the feed is configured under (used for threshold/bounds lookup)
+     * @param oracle Feed address
+     * @param isPaymentFeed True for the payment token feed, false for the base payment token feed (error messages)
+     * @return normalizedPrice The price normalized to 18 decimals
+     */
+    function _readOraclePrice(address token, address oracle, bool isPaymentFeed) internal view returns (uint256 normalizedPrice) {
+        AggregatorV3Interface feed = AggregatorV3Interface(oracle);
+        (, int256 price, , uint256 priceUpdatedAt, ) = feed.latestRoundData();
+
+        require(price > 0, isPaymentFeed ? "TokenSale: invalid payment token price" : "TokenSale: invalid base payment token price");
+        require(priceUpdatedAt > 0, isPaymentFeed ? "TokenSale: payment token price not updated" : "TokenSale: base payment token price not updated");
+
+        // Each feed uses its own staleness threshold (falling back to the default)
+        uint256 threshold = oracleStalenessThreshold[token];
+        if (threshold == 0) threshold = defaultStalenessThreshold;
+        require(block.timestamp - priceUpdatedAt <= threshold, isPaymentFeed ? "TokenSale: payment token price too stale" : "TokenSale: base payment token price too stale");
+
+        // Optional sanity bounds (in feed decimals) against a pinned aggregator circuit breaker
+        uint256 unsignedPrice = uint256(price);
+        uint256 minPrice = oracleMinPrice[token];
+        uint256 maxPrice = oracleMaxPrice[token];
+        require(minPrice == 0 || unsignedPrice >= minPrice, "TokenSale: oracle price below bound");
+        require(maxPrice == 0 || unsignedPrice <= maxPrice, "TokenSale: oracle price above bound");
+
+        // Normalize to 18 decimals
+        uint8 feedDecimals = feed.decimals();
+        normalizedPrice = unsignedPrice;
+        if (feedDecimals < 18) {
+            normalizedPrice *= 10 ** (18 - feedDecimals);
+        } else if (feedDecimals > 18) {
+            normalizedPrice /= 10 ** (feedDecimals - 18);
+        }
+    }
+
+    /**
+     * @dev Revert if the configured L2 sequencer is down or restarted within the grace period
+     */
+    function _checkSequencerUp() internal view {
+        if (sequencerUptimeFeed == address(0)) {
+            return;
+        }
+        (, int256 answer, uint256 startedAt, , ) = AggregatorV3Interface(sequencerUptimeFeed).latestRoundData();
+        // Chainlink sequencer uptime feeds: answer == 0 means the sequencer is up
+        require(answer == 0, "TokenSale: sequencer down");
+        require(block.timestamp - startedAt > sequencerGracePeriod, "TokenSale: sequencer grace period not over");
     }
 
     // ============ Purchase Functions ============
@@ -621,22 +694,75 @@ contract TokenSale is Initializable, AccessControlUpgradeable, ReentrancyGuardUp
      * @dev Purchase tokens with ERC20 payment token
      * @param paymentToken Address of the payment token
      * @param paymentAmount Amount of payment token to pay
-     * @param orderId Optional order ID (bytes32(0) means no orderId). If provided, must be unique.
+     * @param minTokensOut Minimum base tokens the buyer accepts (slippage protection against
+     *                     rate changes between transaction submission and execution)
+     * @param orderId Optional order ID (bytes32(0) means no orderId). Must be unique per buyer.
      * @return baseTokensReceived Amount of base tokens received
      */
     function purchaseWithToken(
         address paymentToken,
         uint256 paymentAmount,
+        uint256 minTokensOut,
         bytes32 orderId
     ) external nonReentrant whenNotPaused returns (uint256 baseTokensReceived) {
+        require(paymentToken != address(0), "TokenSale: use purchaseWithETH for ETH");
+
+        // Checks and effects (statistics/orderId updates) before any external interaction
+        baseTokensReceived = _validateAndRecordPurchase(paymentToken, paymentAmount, minTokensOut, orderId);
+
+        // Transfer payment token from buyer
+        IERC20(paymentToken).safeTransferFrom(msg.sender, paymentRecipient, paymentAmount);
+
+        // Mint base tokens to buyer
+        // This contract must have MINTER_ROLE on the base token (ERC20 contract)
+        // The mint function will check for MINTER_ROLE automatically
+        IERC20Mintable(baseToken).mint(msg.sender, baseTokensReceived);
+
+        emit TokensPurchased(msg.sender, paymentToken, paymentAmount, baseTokensReceived, orderId);
+    }
+
+    /**
+     * @dev Purchase tokens with ETH
+     * @param minTokensOut Minimum base tokens the buyer accepts (slippage protection against
+     *                     rate changes between transaction submission and execution)
+     * @param orderId Optional order ID (bytes32(0) means no orderId). Must be unique per buyer.
+     * @return baseTokensReceived Amount of base tokens received
+     */
+    function purchaseWithETH(uint256 minTokensOut, bytes32 orderId) external payable nonReentrant whenNotPaused returns (uint256 baseTokensReceived) {
+        // Checks and effects (statistics/orderId updates) before any external interaction
+        baseTokensReceived = _validateAndRecordPurchase(address(0), msg.value, minTokensOut, orderId);
+
+        // Transfer ETH to payment recipient
+        (bool sent, ) = paymentRecipient.call{value: msg.value}("");
+        require(sent, "TokenSale: ETH transfer failed");
+
+        // Mint base tokens to buyer
+        IERC20Mintable(baseToken).mint(msg.sender, baseTokensReceived);
+
+        emit TokensPurchased(msg.sender, address(0), msg.value, baseTokensReceived, orderId);
+    }
+
+    /**
+     * @dev Shared purchase validation and state updates (checks + effects, no external value transfers)
+     * @param paymentToken Address of the payment token (address(0) for ETH)
+     * @param paymentAmount Amount of payment token / ETH paid
+     * @param minTokensOut Minimum base tokens the buyer accepts
+     * @param orderId Optional order ID (bytes32(0) means no orderId)
+     * @return baseTokensReceived Amount of base tokens to mint
+     */
+    function _validateAndRecordPurchase(
+        address paymentToken,
+        uint256 paymentAmount,
+        uint256 minTokensOut,
+        bytes32 orderId
+    ) internal returns (uint256 baseTokensReceived) {
         // Check whitelist requirement
         if (requireWhitelist) {
             require(whitelist[msg.sender], "TokenSale: not whitelisted");
         }
 
-        // Validate payment token
+        // Validate payment
         require(allowedPaymentTokens[paymentToken], "TokenSale: payment token not allowed");
-        require(paymentToken != address(0), "TokenSale: use purchaseWithETH for ETH");
         require(paymentAmount > 0, "TokenSale: invalid payment amount");
 
         // Validate sale time window
@@ -647,13 +773,13 @@ contract TokenSale is Initializable, AccessControlUpgradeable, ReentrancyGuardUp
             require(block.timestamp <= saleEndTime, "TokenSale: sale ended");
         }
 
-        // Validate orderId (if provided, must not be used before)
+        // Validate orderId (if provided, must not have been used by this buyer before)
         if (orderId != bytes32(0)) {
-            require(!usedOrderIds[orderId], "TokenSale: orderId already used");
-            usedOrderIds[orderId] = true;
+            require(!usedOrderIds[msg.sender][orderId], "TokenSale: orderId already used");
+            usedOrderIds[msg.sender][orderId] = true;
         }
 
-        // Get current rate (from oracle or manual rate)
+        // Get current rate (from base rate, oracle, or manual rate)
         (uint256 rate, uint8 decimals) = getRate(paymentToken);
         // Rate is stored as: base tokens (18 decimals) per 1 payment token unit
         // Calculation: (paymentAmount * rate) / 10^decimals
@@ -661,6 +787,9 @@ contract TokenSale is Initializable, AccessControlUpgradeable, ReentrancyGuardUp
 
         require(baseTokensReceived > 0, "TokenSale: insufficient payment");
 
+        // Slippage protection: buyer-specified minimum output
+        require(baseTokensReceived >= minTokensOut, "TokenSale: below minTokensOut");
+
         // Validate minimum purchase amount
         if (minPurchaseAmount > 0) {
             require(baseTokensReceived >= minPurchaseAmount, "TokenSale: purchase below minimum");
@@ -671,109 +800,29 @@ contract TokenSale is Initializable, AccessControlUpgradeable, ReentrancyGuardUp
             require(IERC20(baseToken).totalSupply() + baseTokensReceived <= hardCap, "TokenSale: hard cap exceeded");
         }
 
-        // Validate user purchase limits (check against actual balance including tokens from other sources)
+        // Validate user purchase limits against tokens purchased through this sale.
+        // Uses totalPurchased (not balanceOf) so the limit cannot be bypassed by moving
+        // tokens to another wallet, nor griefed by sending the buyer unsolicited tokens.
         uint256 userMaxPurchase = maxPurchasePerUserMapping[msg.sender];
         if (userMaxPurchase == 0) {
             userMaxPurchase = maxPurchasePerUser;
         }
         if (userMaxPurchase > 0) {
-            require(IERC20(baseToken).balanceOf(msg.sender) + baseTokensReceived <= userMaxPurchase, "TokenSale: user purchase limit exceeded");
+            require(totalPurchased[msg.sender] + baseTokensReceived <= userMaxPurchase, "TokenSale: user purchase limit exceeded");
         }
-
-        // Transfer payment token from buyer
-        IERC20(paymentToken).safeTransferFrom(msg.sender, paymentRecipient, paymentAmount);
-
-        // Mint base tokens to buyer
-        // This contract must have MINTER_ROLE on the base token (ERC20 contract)
-        // The mint function will check for MINTER_ROLE automatically
-        IERC20Mintable(baseToken).mint(msg.sender, baseTokensReceived);
 
         // Update statistics
         totalPurchased[msg.sender] += baseTokensReceived;
         purchasedByToken[msg.sender][paymentToken] += baseTokensReceived;
         totalSales += baseTokensReceived;
-        totalRevenue += paymentAmount;
         revenueByToken[paymentToken] += paymentAmount;
-
-        emit TokensPurchased(msg.sender, paymentToken, paymentAmount, baseTokensReceived, orderId);
-    }
-
-    /**
-     * @dev Purchase tokens with ETH
-     * @param orderId Optional order ID (bytes32(0) means no orderId). If provided, must be unique.
-     * @return baseTokensReceived Amount of base tokens received
-     */
-    function purchaseWithETH(bytes32 orderId) external payable nonReentrant whenNotPaused returns (uint256 baseTokensReceived) {
-        // Check whitelist requirement
-        if (requireWhitelist) {
-            require(whitelist[msg.sender], "TokenSale: not whitelisted");
-        }
-
-        // Validate ETH payment
-        require(allowedPaymentTokens[address(0)], "TokenSale: ETH not allowed");
-        require(msg.value > 0, "TokenSale: invalid payment amount");
-
-        // Validate sale time window
-        if (saleStartTime > 0) {
-            require(block.timestamp >= saleStartTime, "TokenSale: sale not started");
-        }
-        if (saleEndTime > 0) {
-            require(block.timestamp <= saleEndTime, "TokenSale: sale ended");
-        }
-
-        // Validate orderId (if provided, must not be used before)
-        if (orderId != bytes32(0)) {
-            require(!usedOrderIds[orderId], "TokenSale: orderId already used");
-            usedOrderIds[orderId] = true;
-        }
-
-        // Get current rate (from oracle or manual rate)
-        (uint256 rate, uint8 decimals) = getRate(address(0));
-        // Should be 18 for ETH
-        baseTokensReceived = (msg.value * rate) / (10 ** decimals);
-
-        require(baseTokensReceived > 0, "TokenSale: insufficient payment");
-
-        // Validate minimum purchase amount
-        if (minPurchaseAmount > 0) {
-            require(baseTokensReceived >= minPurchaseAmount, "TokenSale: purchase below minimum");
-        }
-
-        // Validate hard cap (check against total supply including pre-minted tokens)
-        if (hardCap > 0) {
-            require(IERC20(baseToken).totalSupply() + baseTokensReceived <= hardCap, "TokenSale: hard cap exceeded");
-        }
-
-        // Validate user purchase limits (check against actual balance including tokens from other sources)
-        uint256 userMaxPurchase = maxPurchasePerUserMapping[msg.sender];
-        if (userMaxPurchase == 0) {
-            userMaxPurchase = maxPurchasePerUser;
-        }
-        if (userMaxPurchase > 0) {
-            require(IERC20(baseToken).balanceOf(msg.sender) + baseTokensReceived <= userMaxPurchase, "TokenSale: user purchase limit exceeded");
-        }
-
-        // Transfer ETH to payment recipient
-        (bool sent, ) = paymentRecipient.call{value: msg.value}("");
-        require(sent, "TokenSale: ETH transfer failed");
-
-        // Mint base tokens to buyer
-        IERC20Mintable(baseToken).mint(msg.sender, baseTokensReceived);
-
-        // Update statistics
-        totalPurchased[msg.sender] += baseTokensReceived;
-        purchasedByToken[msg.sender][address(0)] += baseTokensReceived;
-        totalSales += baseTokensReceived;
-        totalRevenue += msg.value;
-        revenueByToken[address(0)] += msg.value;
-
-        emit TokensPurchased(msg.sender, address(0), msg.value, baseTokensReceived, orderId);
     }
 
     // ============ View Functions ============
 
     /**
      * @dev Calculate how many base tokens would be received for a payment amount
+     * @notice Reverts if oracle mode is active and the oracle data is unavailable/stale (fail-closed)
      * @param paymentToken Address of the payment token (address(0) for ETH)
      * @param paymentAmount Amount of payment token (with its decimals)
      * @return baseTokens Amount of base tokens that would be received (with 18 decimals)

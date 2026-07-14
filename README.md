@@ -82,8 +82,10 @@ npm run deploy:testnet
 
 ### Purchase Functions
 
-- `purchaseWithToken(address paymentToken, uint256 paymentAmount)` - Purchase tokens with ERC20 payment token
-- `purchaseWithETH()` - Purchase tokens with ETH (payable function)
+- `purchaseWithToken(address paymentToken, uint256 paymentAmount, uint256 minTokensOut, bytes32 orderId)` - Purchase tokens with ERC20 payment token
+- `purchaseWithETH(uint256 minTokensOut, bytes32 orderId)` - Purchase tokens with ETH (payable function)
+
+`minTokensOut` is slippage protection: the transaction reverts if the rate changed and the buyer would receive fewer tokens than specified (use the value from `calculateTokens`, or 0 to accept any rate). `orderId` is an optional identifier, unique per buyer (`bytes32(0)` = none).
 
 ### View Functions
 
@@ -148,15 +150,17 @@ tokenSale.addToWhitelist(userAddress);
 // User approves payment token
 usdc.approve(tokenSaleAddress, 1000 * 10**6);
 
-// Purchase tokens
-uint256 tokens = tokenSale.purchaseWithToken(usdcAddress, 1000 * 10**6);
+// Purchase tokens (minTokensOut from calculateTokens, orderId optional)
+uint256 minOut = tokenSale.calculateTokens(usdcAddress, 1000 * 10**6);
+uint256 tokens = tokenSale.purchaseWithToken(usdcAddress, 1000 * 10**6, minOut, bytes32(0));
 ```
 
 ### Purchase with ETH
 
 ```solidity
 // Purchase tokens with ETH
-uint256 tokens = tokenSale.purchaseWithETH{value: 1 ether}();
+uint256 minOut = tokenSale.calculateTokens(address(0), 1 ether);
+uint256 tokens = tokenSale.purchaseWithETH{value: 1 ether}(minOut, bytes32(0));
 ```
 
 ### Calculate Tokens Before Purchase
@@ -204,12 +208,24 @@ The contract uses OpenZeppelin's transparent proxy pattern:
 
 ## ⚠️ Security Considerations
 
-- ✅ **Reentrancy Protection**: All purchase functions use `nonReentrant` modifier
+- ✅ **Reentrancy Protection**: All purchase functions use `nonReentrant` (OpenZeppelin `ReentrancyGuardTransient`, requires a Cancun/EIP-1153 chain)
 - ✅ **Access Control**: Admin functions protected with role checks
 - ✅ **Pausable**: Can pause sales in emergencies
 - ✅ **Whitelist**: Optional additional security layer
 - ✅ **SafeERC20**: Uses SafeERC20 for token transfers
-- ✅ **Input Validation**: All inputs are validated
+- ✅ **Input Validation**: All inputs are validated; payment token decimals are verified against the token contract
+- ✅ **Slippage Protection**: Buyers pass `minTokensOut`; purchases revert if the rate moved against them
+- ✅ **Fail-Closed Oracles**: If oracle mode is on and the price is stale, invalid, or out of the configured bounds, purchases revert (no silent fallback to a manual rate). To sell at the manual rate, the admin must explicitly call `setOracleMode(token, false)`
+- ✅ **Oracle Hardening**: Per-feed staleness thresholds, optional min/max price bounds (`setOraclePriceBounds`) against pinned Chainlink circuit breakers, and an optional L2 sequencer uptime check (`setSequencerUptimeFeed` — required on Arbitrum/Optimism/Base)
+- ✅ **Per-User Limits**: Enforced against tokens purchased through the sale (`totalPurchased`), so they cannot be bypassed by moving tokens to another wallet or griefed by unsolicited transfers
+- ✅ **Order IDs**: Scoped per buyer, so a third party cannot front-run and burn someone else's orderId
+
+### Operational requirements
+
+- **Use a multisig (ideally with a timelock) for the admin and proxy admin.** The admin can change rates, redirect payments, withdraw funds, and upgrade the implementation — a single compromised EOA compromises the entire sale.
+- **Off-chain order reconciliation** must verify the buyer address and amounts from the `TokensPurchased` event, never the orderId alone.
+- **Do not allow fee-on-transfer or rebasing tokens as payment tokens** — buyers would be credited for the nominal amount while the recipient receives less.
+- **Hard cap** is measured against the base token's `totalSupply()`: tokens minted elsewhere consume the cap and burns free it up.
 
 ## 📚 Documentation
 
