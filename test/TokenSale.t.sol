@@ -1754,4 +1754,392 @@ contract MockChainlinkOracle is AggregatorV3Interface {
             vm.expectRevert("TokenSale: invalid price bounds");
             tokenSale.setOraclePriceBounds(address(usdc), 100, 50);
         }
+
+        // ============ Cooling-off / Withdrawal (Widerruf) Tests ============
+
+        uint256 constant WD_PERIOD = 14 days;
+
+        function _enableCoolingOff() internal {
+            vm.prank(admin);
+            tokenSale.setWithdrawalPeriod(WD_PERIOD);
+        }
+
+        function test_WithdrawalPeriodDefaultsToInstant() public {
+            // Default is 0 => instant mint (behavior verified by all other purchase tests)
+            assertEq(tokenSale.withdrawalPeriod(), 0);
+
+            uint256 paymentAmount = 10 * 10 ** usdc.decimals();
+            vm.startPrank(user1);
+            usdc.approve(address(tokenSale), paymentAmount);
+            uint256 received = tokenSale.purchaseWithToken(address(usdc), paymentAmount, 0, bytes32(0));
+            vm.stopPrank();
+
+            // Minted immediately, payment forwarded, no order created
+            assertEq(baseToken.balanceOf(user1), received);
+            assertEq(usdc.balanceOf(paymentRecipient), paymentAmount);
+            assertEq(tokenSale.nextOrderId(), 0);
+        }
+
+        function test_SetWithdrawalPeriod() public {
+            _enableCoolingOff();
+            assertEq(tokenSale.withdrawalPeriod(), WD_PERIOD);
+        }
+
+        function test_NonAdminCannotSetWithdrawalPeriod() public {
+            vm.prank(user1);
+            vm.expectRevert();
+            tokenSale.setWithdrawalPeriod(WD_PERIOD);
+        }
+
+        function test_NonAdminCannotSetWithdrawalExempt() public {
+            vm.prank(user1);
+            vm.expectRevert();
+            tokenSale.setWithdrawalExempt(user1, true);
+        }
+
+        function test_CoolingOffReservesDoesNotMintOrForward() public {
+            _enableCoolingOff();
+
+            uint256 paymentAmount = 10 * 10 ** usdc.decimals();
+            uint256 expected = tokenSale.calculateTokens(address(usdc), paymentAmount);
+
+            vm.startPrank(user1);
+            usdc.approve(address(tokenSale), paymentAmount);
+            tokenSale.purchaseWithToken(address(usdc), paymentAmount, 0, bytes32(0));
+            vm.stopPrank();
+
+            // No mint, no forward — payment is escrowed in the contract
+            assertEq(baseToken.balanceOf(user1), 0);
+            assertEq(usdc.balanceOf(paymentRecipient), 0);
+            assertEq(usdc.balanceOf(address(tokenSale)), paymentAmount);
+            assertEq(tokenSale.escrowedByToken(address(usdc)), paymentAmount);
+            assertEq(tokenSale.totalReserved(), expected);
+            assertEq(tokenSale.reservedByUser(user1), expected);
+
+            // Order recorded as Pending, stats not yet counted
+            (
+                address buyer,
+                address paymentToken,
+                uint256 pAmount,
+                uint256 tokensOwed,
+                uint256 unlockTime,,
+                TokenSale.OrderStatus status
+            ) = tokenSale.pendingOrders(1);
+            assertEq(buyer, user1);
+            assertEq(paymentToken, address(usdc));
+            assertEq(pAmount, paymentAmount);
+            assertEq(tokensOwed, expected);
+            assertEq(unlockTime, block.timestamp + WD_PERIOD);
+            assertEq(uint256(status), uint256(TokenSale.OrderStatus.Pending));
+            assertEq(tokenSale.totalSales(), 0);
+        }
+
+        function test_WithdrawRefundsBuyer() public {
+            _enableCoolingOff();
+
+            uint256 paymentAmount = 10 * 10 ** usdc.decimals();
+            uint256 balBefore = usdc.balanceOf(user1);
+
+            vm.startPrank(user1);
+            usdc.approve(address(tokenSale), paymentAmount);
+            tokenSale.purchaseWithToken(address(usdc), paymentAmount, 0, bytes32(0));
+
+            // Withdraw within the window
+            tokenSale.withdrawOrder(1);
+            vm.stopPrank();
+
+            // Fully refunded, nothing minted, escrow cleared
+            assertEq(usdc.balanceOf(user1), balBefore);
+            assertEq(baseToken.balanceOf(user1), 0);
+            assertEq(tokenSale.escrowedByToken(address(usdc)), 0);
+            assertEq(tokenSale.totalReserved(), 0);
+            assertEq(tokenSale.reservedByUser(user1), 0);
+
+            (,,,,,, TokenSale.OrderStatus status) = tokenSale.pendingOrders(1);
+            assertEq(uint256(status), uint256(TokenSale.OrderStatus.Withdrawn));
+        }
+
+        function test_WithdrawETHRefundsBuyer() public {
+            _enableCoolingOff();
+
+            uint256 ethAmount = 1 ether;
+            vm.deal(user1, ethAmount);
+
+            vm.startPrank(user1);
+            tokenSale.purchaseWithETH{value: ethAmount}(0, bytes32(0));
+            assertEq(address(tokenSale).balance, ethAmount);
+            assertEq(tokenSale.escrowedByToken(address(0)), ethAmount);
+
+            tokenSale.withdrawOrder(1);
+            vm.stopPrank();
+
+            assertEq(user1.balance, ethAmount);
+            assertEq(address(tokenSale).balance, 0);
+            assertEq(tokenSale.escrowedByToken(address(0)), 0);
+        }
+
+        function test_SettleMintsAndForwardsAfterWindow() public {
+            _enableCoolingOff();
+
+            uint256 paymentAmount = 10 * 10 ** usdc.decimals();
+            uint256 expected = tokenSale.calculateTokens(address(usdc), paymentAmount);
+
+            vm.startPrank(user1);
+            usdc.approve(address(tokenSale), paymentAmount);
+            tokenSale.purchaseWithToken(address(usdc), paymentAmount, 0, bytes32(0));
+            vm.stopPrank();
+
+            // Cannot settle before the window closes
+            vm.expectRevert("TokenSale: still in withdrawal period");
+            tokenSale.settleOrder(1);
+
+            vm.warp(block.timestamp + WD_PERIOD);
+
+            // Permissionless settle (called by a third party)
+            vm.prank(user2);
+            tokenSale.settleOrder(1);
+
+            // Tokens minted to buyer, payment forwarded, stats now counted
+            assertEq(baseToken.balanceOf(user1), expected);
+            assertEq(usdc.balanceOf(paymentRecipient), paymentAmount);
+            assertEq(tokenSale.escrowedByToken(address(usdc)), 0);
+            assertEq(tokenSale.totalReserved(), 0);
+            assertEq(tokenSale.reservedByUser(user1), 0);
+            assertEq(tokenSale.totalPurchased(user1), expected);
+            assertEq(tokenSale.totalSales(), expected);
+            assertEq(tokenSale.revenueByToken(address(usdc)), paymentAmount);
+
+            (,,,,,, TokenSale.OrderStatus status) = tokenSale.pendingOrders(1);
+            assertEq(uint256(status), uint256(TokenSale.OrderStatus.Settled));
+        }
+
+        function test_CannotWithdrawAfterWindow() public {
+            _enableCoolingOff();
+
+            uint256 paymentAmount = 10 * 10 ** usdc.decimals();
+            vm.startPrank(user1);
+            usdc.approve(address(tokenSale), paymentAmount);
+            tokenSale.purchaseWithToken(address(usdc), paymentAmount, 0, bytes32(0));
+            vm.stopPrank();
+
+            vm.warp(block.timestamp + WD_PERIOD);
+
+            vm.prank(user1);
+            vm.expectRevert("TokenSale: withdrawal period over");
+            tokenSale.withdrawOrder(1);
+        }
+
+        function test_OnlyBuyerCanWithdraw() public {
+            _enableCoolingOff();
+
+            uint256 paymentAmount = 10 * 10 ** usdc.decimals();
+            vm.startPrank(user1);
+            usdc.approve(address(tokenSale), paymentAmount);
+            tokenSale.purchaseWithToken(address(usdc), paymentAmount, 0, bytes32(0));
+            vm.stopPrank();
+
+            vm.prank(user2);
+            vm.expectRevert("TokenSale: not order owner");
+            tokenSale.withdrawOrder(1);
+        }
+
+        function test_CannotSettleWithdrawnOrder() public {
+            _enableCoolingOff();
+
+            uint256 paymentAmount = 10 * 10 ** usdc.decimals();
+            vm.startPrank(user1);
+            usdc.approve(address(tokenSale), paymentAmount);
+            tokenSale.purchaseWithToken(address(usdc), paymentAmount, 0, bytes32(0));
+            tokenSale.withdrawOrder(1);
+            vm.stopPrank();
+
+            vm.warp(block.timestamp + WD_PERIOD);
+            vm.expectRevert("TokenSale: order not pending");
+            tokenSale.settleOrder(1);
+        }
+
+        function test_CannotWithdrawTwice() public {
+            _enableCoolingOff();
+
+            uint256 paymentAmount = 10 * 10 ** usdc.decimals();
+            vm.startPrank(user1);
+            usdc.approve(address(tokenSale), paymentAmount);
+            tokenSale.purchaseWithToken(address(usdc), paymentAmount, 0, bytes32(0));
+            tokenSale.withdrawOrder(1);
+            vm.expectRevert("TokenSale: order not pending");
+            tokenSale.withdrawOrder(1);
+            vm.stopPrank();
+        }
+
+        function test_WithdrawExemptBuyerSettlesInstantly() public {
+            _enableCoolingOff();
+
+            vm.prank(admin);
+            tokenSale.setWithdrawalExempt(user1, true);
+            assertTrue(tokenSale.withdrawalExempt(user1));
+
+            uint256 paymentAmount = 10 * 10 ** usdc.decimals();
+            uint256 expected = tokenSale.calculateTokens(address(usdc), paymentAmount);
+
+            vm.startPrank(user1);
+            usdc.approve(address(tokenSale), paymentAmount);
+            uint256 received = tokenSale.purchaseWithToken(address(usdc), paymentAmount, 0, bytes32(0));
+            vm.stopPrank();
+
+            // Exempt buyer mints immediately even though a withdrawal period is active
+            assertEq(received, expected);
+            assertEq(baseToken.balanceOf(user1), expected);
+            assertEq(usdc.balanceOf(paymentRecipient), paymentAmount);
+            assertEq(tokenSale.nextOrderId(), 0);
+        }
+
+        function test_RefundWorksWhilePaused() public {
+            _enableCoolingOff();
+
+            uint256 paymentAmount = 10 * 10 ** usdc.decimals();
+            vm.startPrank(user1);
+            usdc.approve(address(tokenSale), paymentAmount);
+            tokenSale.purchaseWithToken(address(usdc), paymentAmount, 0, bytes32(0));
+            vm.stopPrank();
+
+            // Even if the sale is paused, the buyer can still get a refund
+            vm.prank(admin);
+            tokenSale.pause();
+
+            uint256 balBefore = usdc.balanceOf(user1);
+            vm.prank(user1);
+            tokenSale.withdrawOrder(1);
+            assertEq(usdc.balanceOf(user1), balBefore + paymentAmount);
+        }
+
+        function test_EmergencyWithdrawCannotTouchEscrow() public {
+            _enableCoolingOff();
+
+            uint256 paymentAmount = 10 * 10 ** usdc.decimals();
+            vm.startPrank(user1);
+            usdc.approve(address(tokenSale), paymentAmount);
+            tokenSale.purchaseWithToken(address(usdc), paymentAmount, 0, bytes32(0));
+            vm.stopPrank();
+
+            // Escrow holds exactly paymentAmount; nothing withdrawable
+            vm.prank(admin);
+            vm.expectRevert("TokenSale: no tokens to withdraw");
+            tokenSale.emergencyWithdraw(address(usdc), admin, 0);
+
+            // Trying to take the escrowed funds explicitly also reverts
+            vm.prank(admin);
+            vm.expectRevert("TokenSale: exceeds withdrawable (escrow protected)");
+            tokenSale.emergencyWithdraw(address(usdc), admin, paymentAmount);
+
+            // A surplus (accidental transfer) above escrow IS withdrawable
+            usdc.mint(address(tokenSale), 500 * 10 ** usdc.decimals());
+            vm.prank(admin);
+            tokenSale.emergencyWithdraw(address(usdc), admin, 0);
+            // Escrow remains intact for the buyer
+            assertEq(usdc.balanceOf(address(tokenSale)), paymentAmount);
+            assertEq(tokenSale.escrowedByToken(address(usdc)), paymentAmount);
+        }
+
+        function test_CoolingOffReservationCountsAgainstHardCap() public {
+            _enableCoolingOff();
+
+            uint256 initialSupply = baseToken.totalSupply();
+            uint8 usdcDecimals = tokenSale.paymentTokenDecimals(address(usdc));
+            // 10 USDC = 1,000 tokens per purchase
+            uint256 paymentAmount = 10 * 10 ** usdcDecimals;
+            uint256 perPurchase = tokenSale.calculateTokens(address(usdc), paymentAmount);
+
+            // Cap allows exactly one purchase worth of new tokens
+            vm.prank(admin);
+            tokenSale.setHardCap(initialSupply + perPurchase);
+
+            vm.startPrank(user1);
+            usdc.approve(address(tokenSale), paymentAmount * 2);
+            tokenSale.purchaseWithToken(address(usdc), paymentAmount, 0, bytes32(0));
+
+            // Second reservation would exceed the cap even though nothing is minted yet
+            vm.expectRevert("TokenSale: hard cap exceeded");
+            tokenSale.purchaseWithToken(address(usdc), paymentAmount, 0, bytes32(0));
+            vm.stopPrank();
+        }
+
+        function test_CoolingOffReservationCountsAgainstUserLimit() public {
+            _enableCoolingOff();
+
+            uint8 usdcDecimals = tokenSale.paymentTokenDecimals(address(usdc));
+            uint256 paymentAmount = 40 * 10 ** usdcDecimals; // 4,000 tokens
+            uint256 perPurchase = tokenSale.calculateTokens(address(usdc), paymentAmount);
+
+            vm.prank(admin);
+            tokenSale.setMaxPurchasePerUser(perPurchase + 1);
+
+            vm.startPrank(user1);
+            usdc.approve(address(tokenSale), paymentAmount * 2);
+            tokenSale.purchaseWithToken(address(usdc), paymentAmount, 0, bytes32(0));
+
+            // Pending reservation already consumes the user's limit
+            vm.expectRevert("TokenSale: user purchase limit exceeded");
+            tokenSale.purchaseWithToken(address(usdc), paymentAmount, 0, bytes32(0));
+            vm.stopPrank();
+        }
+
+        function test_WithdrawReleasesReservationForNewPurchase() public {
+            _enableCoolingOff();
+
+            uint8 usdcDecimals = tokenSale.paymentTokenDecimals(address(usdc));
+            uint256 paymentAmount = 40 * 10 ** usdcDecimals;
+            uint256 perPurchase = tokenSale.calculateTokens(address(usdc), paymentAmount);
+
+            vm.prank(admin);
+            tokenSale.setMaxPurchasePerUser(perPurchase);
+
+            vm.startPrank(user1);
+            usdc.approve(address(tokenSale), paymentAmount * 2);
+            tokenSale.purchaseWithToken(address(usdc), paymentAmount, 0, bytes32(0));
+
+            // At the limit; withdraw frees it, then a new reservation succeeds
+            tokenSale.withdrawOrder(1);
+            tokenSale.purchaseWithToken(address(usdc), paymentAmount, 0, bytes32(0));
+            vm.stopPrank();
+
+            assertEq(tokenSale.reservedByUser(user1), perPurchase);
+            assertEq(tokenSale.nextOrderId(), 2);
+        }
+
+        function test_SettledPriceIsSnapshottedAtPurchase() public {
+            _enableCoolingOff();
+
+            uint256 paymentAmount = 10 * 10 ** usdc.decimals();
+            uint256 expected = tokenSale.calculateTokens(address(usdc), paymentAmount);
+
+            vm.startPrank(user1);
+            usdc.approve(address(tokenSale), paymentAmount);
+            tokenSale.purchaseWithToken(address(usdc), paymentAmount, 0, bytes32(0));
+            vm.stopPrank();
+
+            // Rate changes after purchase; settlement must honor the snapshot
+            vm.prank(admin);
+            tokenSale.updatePaymentTokenRate(address(usdc), 50 * 10 ** 18);
+
+            vm.warp(block.timestamp + WD_PERIOD);
+            tokenSale.settleOrder(1);
+
+            assertEq(baseToken.balanceOf(user1), expected);
+        }
+
+        function test_CoolingOffOrderIdStillDedupedPerBuyer() public {
+            _enableCoolingOff();
+
+            uint256 paymentAmount = 10 * 10 ** usdc.decimals();
+            bytes32 orderRef = keccak256("WD_ORDER_1");
+
+            vm.startPrank(user1);
+            usdc.approve(address(tokenSale), paymentAmount * 2);
+            tokenSale.purchaseWithToken(address(usdc), paymentAmount, 0, orderRef);
+            assertTrue(tokenSale.usedOrderIds(user1, orderRef));
+
+            vm.expectRevert("TokenSale: orderId already used");
+            tokenSale.purchaseWithToken(address(usdc), paymentAmount, 0, orderRef);
+            vm.stopPrank();
+        }
     }

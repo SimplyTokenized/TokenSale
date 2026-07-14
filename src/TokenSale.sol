@@ -92,6 +92,39 @@ contract TokenSale is Initializable, AccessControlUpgradeable, ReentrancyGuardTr
     uint256 public saleStartTime; // Sale start timestamp (0 = no start time restriction)
     uint256 public saleEndTime; // Sale end timestamp (0 = no end time restriction)
 
+    // ============ Cooling-off / withdrawal (Widerruf) ============
+    // Optional consumer cooling-off period. When active for a purchase, the payment is held in
+    // escrow and the base tokens are NOT minted immediately; instead the order is recorded and
+    // the buyer may withdraw (full refund) until unlockTime, after which anyone may settle the
+    // order (payment forwarded to paymentRecipient, tokens minted to the buyer).
+    // This is a process, not a hard guarantee: an upgrade of the implementation could change it,
+    // so the proxy admin should be a multisig/timelock (see README).
+
+    enum OrderStatus {
+        None, // 0 - default / non-existent
+        Pending, // 1 - escrowed, awaiting withdraw or settle
+        Withdrawn, // 2 - refunded to buyer
+        Settled // 3 - payment forwarded, tokens minted
+    }
+
+    struct PendingOrder {
+        address buyer;
+        address paymentToken; // address(0) for ETH
+        uint256 paymentAmount; // amount held in escrow
+        uint256 tokensOwed; // base tokens to mint on settle (rate snapshotted at purchase)
+        uint256 unlockTime; // withdraw allowed before this; settle allowed at/after
+        bytes32 orderRef; // optional off-chain order reference supplied at purchase
+        OrderStatus status;
+    }
+
+    uint256 public withdrawalPeriod; // Cooling-off seconds (0 = disabled: mint immediately, today's behavior)
+    uint256 public nextOrderId; // Sequential id of the last created order (ids start at 1)
+    uint256 public totalReserved; // Base tokens reserved by pending orders (counted against hardCap)
+    mapping(address => bool) public withdrawalExempt; // Buyers exempt from cooling-off (e.g. professional investors)
+    mapping(address => uint256) public escrowedByToken; // Payment held in escrow per token (protects emergencyWithdraw)
+    mapping(address => uint256) public reservedByUser; // Base tokens reserved by a user's pending orders (per-user limit)
+    mapping(uint256 => PendingOrder) public pendingOrders; // orderId => order
+
     // Events
     event TokensPurchased(
         address indexed buyer,
@@ -130,6 +163,21 @@ contract TokenSale is Initializable, AccessControlUpgradeable, ReentrancyGuardTr
         uint256 saleEndTime
     );
     event EmergencyWithdrawal(address indexed token, address indexed recipient, uint256 amount);
+    event WithdrawalPeriodUpdated(uint256 newPeriod);
+    event WithdrawalExemptUpdated(address indexed account, bool exempt);
+    event PurchaseReserved(
+        uint256 indexed orderId,
+        address indexed buyer,
+        address indexed paymentToken,
+        uint256 paymentAmount,
+        uint256 tokensOwed,
+        uint256 unlockTime,
+        bytes32 orderRef
+    );
+    event PurchaseWithdrawn(
+        uint256 indexed orderId, address indexed buyer, address indexed paymentToken, uint256 paymentAmount
+    );
+    event PurchaseSettled(uint256 indexed orderId, address indexed buyer, uint256 tokensOwed);
 
     /// @custom:oz-upgrades-unsafe-allow constructor
     constructor() {
@@ -556,31 +604,61 @@ contract TokenSale is Initializable, AccessControlUpgradeable, ReentrancyGuardTr
         emit SaleTimeWindowUpdated(_saleStartTime, _saleEndTime);
     }
 
+    // ============ Cooling-off Configuration ============
+
     /**
-     * @dev Emergency withdrawal function to recover tokens/ETH
+     * @dev Set the cooling-off (withdrawal) period applied to new purchases
+     * @notice 0 disables cooling-off: purchases mint immediately and forward payment (default behavior).
+     *         Any value > 0 routes non-exempt buyers through escrow + delayed mint.
+     * @notice Changing this does not affect existing orders; each order keeps the unlockTime it was created with.
+     * @param newPeriod New cooling-off period in seconds (0 = disabled)
+     */
+    function setWithdrawalPeriod(uint256 newPeriod) external onlyRole(ADMIN_ROLE) {
+        withdrawalPeriod = newPeriod;
+        emit WithdrawalPeriodUpdated(newPeriod);
+    }
+
+    /**
+     * @dev Exempt (or un-exempt) a buyer from the cooling-off period
+     * @notice Exempt buyers always settle instantly, even while a withdrawal period is active.
+     *         Intended for verified professional investors; must be set by the issuer after
+     *         classification, never chosen by the buyer at purchase time.
+     * @param account Buyer address
+     * @param exempt True to exempt from cooling-off, false to subject them to it
+     */
+    function setWithdrawalExempt(address account, bool exempt) external onlyRole(ADMIN_ROLE) {
+        require(account != address(0), "TokenSale: invalid account");
+        withdrawalExempt[account] = exempt;
+        emit WithdrawalExemptUpdated(account, exempt);
+    }
+
+    /**
+     * @dev Emergency withdrawal function to recover surplus tokens/ETH
+     * @notice Cannot touch funds held in escrow for pending cooling-off orders; only the balance
+     *         above escrowedByToken[token] is withdrawable, so buyer refunds are never at risk.
      * @param token Address of the token to withdraw (address(0) for ETH)
      * @param recipient Address to receive the tokens
-     * @param amount Amount to withdraw (0 = withdraw all for this token)
+     * @param amount Amount to withdraw (0 = withdraw all withdrawable for this token)
      */
     function emergencyWithdraw(address token, address recipient, uint256 amount) external onlyRole(ADMIN_ROLE) {
         require(recipient != address(0), "TokenSale: invalid recipient");
 
         if (token == address(0)) {
-            // Withdraw ETH
-            uint256 balance = address(this).balance;
-            uint256 withdrawAmount = amount == 0 ? balance : amount;
+            // Withdraw ETH surplus (excluding escrowed pending refunds)
+            uint256 available = address(this).balance - escrowedByToken[address(0)];
+            uint256 withdrawAmount = amount == 0 ? available : amount;
             require(withdrawAmount > 0, "TokenSale: no ETH to withdraw");
-            require(withdrawAmount <= balance, "TokenSale: insufficient ETH balance");
+            require(withdrawAmount <= available, "TokenSale: exceeds withdrawable (escrow protected)");
 
             (bool sent,) = recipient.call{value: withdrawAmount}("");
             require(sent, "TokenSale: ETH withdrawal failed");
             emit EmergencyWithdrawal(address(0), recipient, withdrawAmount);
         } else {
-            // Withdraw ERC20 token
-            uint256 balance = IERC20(token).balanceOf(address(this));
-            uint256 withdrawAmount = amount == 0 ? balance : amount;
+            // Withdraw ERC20 surplus (excluding escrowed pending refunds)
+            uint256 available = IERC20(token).balanceOf(address(this)) - escrowedByToken[token];
+            uint256 withdrawAmount = amount == 0 ? available : amount;
             require(withdrawAmount > 0, "TokenSale: no tokens to withdraw");
-            require(withdrawAmount <= balance, "TokenSale: insufficient token balance");
+            require(withdrawAmount <= available, "TokenSale: exceeds withdrawable (escrow protected)");
 
             IERC20(token).safeTransfer(recipient, withdrawAmount);
             emit EmergencyWithdrawal(token, recipient, withdrawAmount);
@@ -740,18 +818,23 @@ contract TokenSale is Initializable, AccessControlUpgradeable, ReentrancyGuardTr
     {
         require(paymentToken != address(0), "TokenSale: use purchaseWithETH for ETH");
 
-        // Checks and effects (statistics/orderId updates) before any external interaction
-        baseTokensReceived = _validateAndRecordPurchase(paymentToken, paymentAmount, minTokensOut, orderId);
+        // Checks (validation, caps, orderId) — no stats written yet
+        uint256 tokensOut = _validatePurchase(paymentToken, paymentAmount, minTokensOut, orderId);
 
-        // Transfer payment token from buyer
-        IERC20(paymentToken).safeTransferFrom(msg.sender, paymentRecipient, paymentAmount);
-
-        // Mint base tokens to buyer
-        // This contract must have MINTER_ROLE on the base token (ERC20 contract)
-        // The mint function will check for MINTER_ROLE automatically
-        IERC20Mintable(baseToken).mint(msg.sender, baseTokensReceived);
-
-        emit TokensPurchased(msg.sender, paymentToken, paymentAmount, baseTokensReceived, orderId);
+        if (_usesCoolingOff(msg.sender)) {
+            // Cooling-off: escrow payment, reserve tokens, mint deferred to settle
+            _reserveOrder(msg.sender, paymentToken, paymentAmount, tokensOut, orderId);
+            IERC20(paymentToken).safeTransferFrom(msg.sender, address(this), paymentAmount);
+        } else {
+            // Instant: record sale, forward payment, mint now
+            _recordSale(msg.sender, paymentToken, paymentAmount, tokensOut);
+            IERC20(paymentToken).safeTransferFrom(msg.sender, paymentRecipient, paymentAmount);
+            // This contract must have MINTER_ROLE on the base token; mint() checks it automatically
+            IERC20Mintable(baseToken).mint(msg.sender, tokensOut);
+            emit TokensPurchased(msg.sender, paymentToken, paymentAmount, tokensOut, orderId);
+        }
+        // Amount received (instant) or reserved for later minting (cooling-off)
+        baseTokensReceived = tokensOut;
     }
 
     /**
@@ -768,33 +851,110 @@ contract TokenSale is Initializable, AccessControlUpgradeable, ReentrancyGuardTr
         whenNotPaused
         returns (uint256 baseTokensReceived)
     {
-        // Checks and effects (statistics/orderId updates) before any external interaction
-        baseTokensReceived = _validateAndRecordPurchase(address(0), msg.value, minTokensOut, orderId);
+        // Checks (validation, caps, orderId) — no stats written yet
+        uint256 tokensOut = _validatePurchase(address(0), msg.value, minTokensOut, orderId);
 
-        // Transfer ETH to payment recipient
-        (bool sent,) = paymentRecipient.call{value: msg.value}("");
-        require(sent, "TokenSale: ETH transfer failed");
-
-        // Mint base tokens to buyer
-        IERC20Mintable(baseToken).mint(msg.sender, baseTokensReceived);
-
-        emit TokensPurchased(msg.sender, address(0), msg.value, baseTokensReceived, orderId);
+        if (_usesCoolingOff(msg.sender)) {
+            // Cooling-off: ETH is already held by the contract (msg.value); reserve, mint deferred
+            _reserveOrder(msg.sender, address(0), msg.value, tokensOut, orderId);
+        } else {
+            // Instant: record sale, forward ETH, mint now
+            _recordSale(msg.sender, address(0), msg.value, tokensOut);
+            (bool sent,) = paymentRecipient.call{value: msg.value}("");
+            require(sent, "TokenSale: ETH transfer failed");
+            IERC20Mintable(baseToken).mint(msg.sender, tokensOut);
+            emit TokensPurchased(msg.sender, address(0), msg.value, tokensOut, orderId);
+        }
+        // Amount received (instant) or reserved for later minting (cooling-off)
+        baseTokensReceived = tokensOut;
     }
 
     /**
-     * @dev Shared purchase validation and state updates (checks + effects, no external value transfers)
-     * @param paymentToken Address of the payment token (address(0) for ETH)
-     * @param paymentAmount Amount of payment token / ETH paid
-     * @param minTokensOut Minimum base tokens the buyer accepts
-     * @param orderId Optional order ID (bytes32(0) means no orderId)
-     * @return baseTokensReceived Amount of base tokens to mint
+     * @dev Withdraw (widerrufen) a pending cooling-off order and get a full refund
+     * @notice Only the order's buyer, only while status is Pending and before unlockTime.
+     *         Allowed even when the sale is paused, so refunds are always reachable.
+     * @param orderId The order id emitted in PurchaseReserved
      */
-    function _validateAndRecordPurchase(
-        address paymentToken,
-        uint256 paymentAmount,
-        uint256 minTokensOut,
-        bytes32 orderId
-    ) internal returns (uint256 baseTokensReceived) {
+    function withdrawOrder(uint256 orderId) external nonReentrant {
+        PendingOrder storage order = pendingOrders[orderId];
+        require(order.status == OrderStatus.Pending, "TokenSale: order not pending");
+        require(order.buyer == msg.sender, "TokenSale: not order owner");
+        require(block.timestamp < order.unlockTime, "TokenSale: withdrawal period over");
+
+        // Effects (checks-effects-interactions)
+        order.status = OrderStatus.Withdrawn;
+        address paymentToken = order.paymentToken;
+        uint256 paymentAmount = order.paymentAmount;
+        escrowedByToken[paymentToken] -= paymentAmount;
+        totalReserved -= order.tokensOwed;
+        reservedByUser[msg.sender] -= order.tokensOwed;
+
+        // Interaction: refund the buyer
+        if (paymentToken == address(0)) {
+            (bool sent,) = msg.sender.call{value: paymentAmount}("");
+            require(sent, "TokenSale: ETH refund failed");
+        } else {
+            IERC20(paymentToken).safeTransfer(msg.sender, paymentAmount);
+        }
+
+        emit PurchaseWithdrawn(orderId, msg.sender, paymentToken, paymentAmount);
+    }
+
+    /**
+     * @dev Settle a pending cooling-off order after its window closes: forward payment and mint
+     * @notice Permissionless once block.timestamp >= unlockTime — buyer, issuer, or a keeper may call.
+     *         Allowed even when paused so committed orders can always complete.
+     * @param orderId The order id emitted in PurchaseReserved
+     */
+    function settleOrder(uint256 orderId) external nonReentrant {
+        PendingOrder storage order = pendingOrders[orderId];
+        require(order.status == OrderStatus.Pending, "TokenSale: order not pending");
+        require(block.timestamp >= order.unlockTime, "TokenSale: still in withdrawal period");
+
+        // Effects
+        order.status = OrderStatus.Settled;
+        address buyer = order.buyer;
+        address paymentToken = order.paymentToken;
+        uint256 paymentAmount = order.paymentAmount;
+        uint256 tokensOwed = order.tokensOwed;
+        bytes32 orderRef = order.orderRef;
+
+        escrowedByToken[paymentToken] -= paymentAmount;
+        totalReserved -= tokensOwed;
+        reservedByUser[buyer] -= tokensOwed;
+        _recordSale(buyer, paymentToken, paymentAmount, tokensOwed);
+
+        // Interactions: forward payment to recipient, then mint to buyer
+        if (paymentToken == address(0)) {
+            (bool sent,) = paymentRecipient.call{value: paymentAmount}("");
+            require(sent, "TokenSale: ETH forward failed");
+        } else {
+            IERC20(paymentToken).safeTransfer(paymentRecipient, paymentAmount);
+        }
+        IERC20Mintable(baseToken).mint(buyer, tokensOwed);
+
+        emit PurchaseSettled(orderId, buyer, tokensOwed);
+        emit TokensPurchased(buyer, paymentToken, paymentAmount, tokensOwed, orderRef);
+    }
+
+    // ============ Internal Purchase Helpers ============
+
+    /**
+     * @dev Whether a purchase by `buyer` should route through the cooling-off escrow flow
+     */
+    function _usesCoolingOff(address buyer) internal view returns (bool) {
+        return withdrawalPeriod > 0 && !withdrawalExempt[buyer];
+    }
+
+    /**
+     * @dev Validate a purchase and compute the base tokens out. Writes only the orderId dedup flag;
+     *      no sale statistics and no escrow state are changed here.
+     * @return baseTokensOut Base tokens the buyer will receive (instant) or have reserved (cooling-off)
+     */
+    function _validatePurchase(address paymentToken, uint256 paymentAmount, uint256 minTokensOut, bytes32 orderId)
+        internal
+        returns (uint256 baseTokensOut)
+    {
         // Check whitelist requirement
         if (requireWhitelist) {
             require(whitelist[msg.sender], "TokenSale: not whitelisted");
@@ -822,25 +982,29 @@ contract TokenSale is Initializable, AccessControlUpgradeable, ReentrancyGuardTr
         (uint256 rate, uint8 decimals) = getRate(paymentToken);
         // Rate is stored as: base tokens (18 decimals) per 1 payment token unit
         // Calculation: (paymentAmount * rate) / 10^decimals
-        baseTokensReceived = (paymentAmount * rate) / (10 ** decimals);
+        baseTokensOut = (paymentAmount * rate) / (10 ** decimals);
 
-        require(baseTokensReceived > 0, "TokenSale: insufficient payment");
+        require(baseTokensOut > 0, "TokenSale: insufficient payment");
 
         // Slippage protection: buyer-specified minimum output
-        require(baseTokensReceived >= minTokensOut, "TokenSale: below minTokensOut");
+        require(baseTokensOut >= minTokensOut, "TokenSale: below minTokensOut");
 
         // Validate minimum purchase amount
         if (minPurchaseAmount > 0) {
-            require(baseTokensReceived >= minPurchaseAmount, "TokenSale: purchase below minimum");
+            require(baseTokensOut >= minPurchaseAmount, "TokenSale: purchase below minimum");
         }
 
-        // Validate hard cap (check against total supply including pre-minted tokens)
+        // Validate hard cap. Reserved (pending, not-yet-minted) tokens count too, so many pending
+        // cooling-off orders cannot collectively oversell the cap.
         if (hardCap > 0) {
-            require(IERC20(baseToken).totalSupply() + baseTokensReceived <= hardCap, "TokenSale: hard cap exceeded");
+            require(
+                IERC20(baseToken).totalSupply() + totalReserved + baseTokensOut <= hardCap,
+                "TokenSale: hard cap exceeded"
+            );
         }
 
-        // Validate user purchase limits against tokens purchased through this sale.
-        // Uses totalPurchased (not balanceOf) so the limit cannot be bypassed by moving
+        // Validate user purchase limits against tokens bought through this sale plus reservations.
+        // Uses totalPurchased/reservedByUser (not balanceOf) so the limit cannot be bypassed by moving
         // tokens to another wallet, nor griefed by sending the buyer unsolicited tokens.
         uint256 userMaxPurchase = maxPurchasePerUserMapping[msg.sender];
         if (userMaxPurchase == 0) {
@@ -848,16 +1012,48 @@ contract TokenSale is Initializable, AccessControlUpgradeable, ReentrancyGuardTr
         }
         if (userMaxPurchase > 0) {
             require(
-                totalPurchased[msg.sender] + baseTokensReceived <= userMaxPurchase,
+                totalPurchased[msg.sender] + reservedByUser[msg.sender] + baseTokensOut <= userMaxPurchase,
                 "TokenSale: user purchase limit exceeded"
             );
         }
+    }
 
-        // Update statistics
-        totalPurchased[msg.sender] += baseTokensReceived;
-        purchasedByToken[msg.sender][paymentToken] += baseTokensReceived;
-        totalSales += baseTokensReceived;
+    /**
+     * @dev Record a completed sale's statistics (used by instant purchases and by settle)
+     */
+    function _recordSale(address buyer, address paymentToken, uint256 paymentAmount, uint256 tokensOut) internal {
+        totalPurchased[buyer] += tokensOut;
+        purchasedByToken[buyer][paymentToken] += tokensOut;
+        totalSales += tokensOut;
         revenueByToken[paymentToken] += paymentAmount;
+    }
+
+    /**
+     * @dev Create a pending (escrowed) cooling-off order. Assumes payment is/will be held by this
+     *      contract in the same transaction. Does not update sale statistics (that happens on settle).
+     */
+    function _reserveOrder(
+        address buyer,
+        address paymentToken,
+        uint256 paymentAmount,
+        uint256 tokensOut,
+        bytes32 orderRef
+    ) internal {
+        uint256 id = ++nextOrderId;
+        uint256 unlock = block.timestamp + withdrawalPeriod;
+        pendingOrders[id] = PendingOrder({
+            buyer: buyer,
+            paymentToken: paymentToken,
+            paymentAmount: paymentAmount,
+            tokensOwed: tokensOut,
+            unlockTime: unlock,
+            orderRef: orderRef,
+            status: OrderStatus.Pending
+        });
+        escrowedByToken[paymentToken] += paymentAmount;
+        totalReserved += tokensOut;
+        reservedByUser[buyer] += tokensOut;
+        emit PurchaseReserved(id, buyer, paymentToken, paymentAmount, tokensOut, unlock, orderRef);
     }
 
     // ============ View Functions ============

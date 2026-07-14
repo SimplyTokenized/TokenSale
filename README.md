@@ -11,6 +11,7 @@ An upgradeable token sale contract where users purchase newly minted base tokens
 - **Slippage Protection** — buyers specify the minimum tokens they accept
 - **Sale Limits** — hard cap, minimum purchase, per-user limits (global and per-address overrides), start/end time window
 - **Optional Whitelisting** — restrict purchases to approved addresses
+- **Optional Cooling-off / Widerruf** — configurable withdrawal period: payment escrowed, minting deferred, buyer can cancel for a full refund until the window closes
 - **Order IDs** — optional per-buyer order identifiers for off-chain reconciliation
 - **Purchase Statistics** — totals per user, per payment token, and per sale
 - **Pausable** — admin can halt sales in an emergency
@@ -66,6 +67,13 @@ npm run deploy:nodejs   # Node.js/ethers deployment path (see DEPLOY_NODEJS.md)
 
 `minTokensOut` is slippage protection: the transaction reverts if the rate changed and the buyer would receive fewer tokens than specified. Use the value from `calculateTokens`, or `0` to accept any rate. `orderId` is an optional identifier, unique per buyer (`bytes32(0)` = none).
 
+**Return value / minting timing depends on the cooling-off setting** (see [below](#-cooling-off--withdrawal-widerruf)): with no cooling-off period, tokens mint immediately and the return value is the amount minted; with a cooling-off period active, the purchase escrows the payment and *reserves* the amount (nothing minted yet), and the returned value is the reserved amount. The `orderId` (uint256) to withdraw or settle is emitted in the `PurchaseReserved` event.
+
+### Cooling-off Functions
+
+- `withdrawOrder(uint256 orderId)` — buyer cancels a pending order before its window closes and is fully refunded (works even while the sale is paused)
+- `settleOrder(uint256 orderId)` — after the window closes, anyone (buyer, issuer, or a keeper) forwards the payment and mints the tokens to the buyer
+
 ### View Functions
 
 - `calculateTokens(address paymentToken, uint256 paymentAmount)` — quote the base tokens for a payment amount (reverts if oracle data is unavailable — fail-closed)
@@ -95,6 +103,10 @@ npm run deploy:nodejs   # Node.js/ethers deployment path (see DEPLOY_NODEJS.md)
 #### Sale Limits
 - `configureSale(uint256 hardCap, uint256 minPurchaseAmount, uint256 maxPurchasePerUser, uint256 saleStartTime, uint256 saleEndTime)` — configure everything at once (0 = no restriction)
 - `setHardCap`, `setMinPurchaseAmount`, `setMaxPurchasePerUser`, `setMaxPurchaseForUser(address user, uint256 max)`, `setSaleTimeWindow`
+
+#### Cooling-off (Widerruf)
+- `setWithdrawalPeriod(uint256 seconds_)` — cooling-off window applied to new purchases; `0` disables it (instant minting, the default)
+- `setWithdrawalExempt(address account, bool exempt)` — exempt a buyer (e.g. a verified professional investor) from the cooling-off period, so their purchases settle instantly
 
 #### Whitelist & Operations
 - `addToWhitelist(address)` / `removeFromWhitelist(address)` — requires `ADMIN_ROLE` or `WHITELIST_ROLE`
@@ -218,6 +230,29 @@ Think of it like a shop that prices everything in euros but accepts other curren
 > **Do not mix quote currencies.** Pairing a `USDC/USD` feed with a `EUR/GBP` feed produces a silently wrong price — the contract trusts your feed configuration and cannot detect the mismatch. Always double-check every feed is `.../USD` (or all `.../ETH`), and verify your setup with `calculateTokens` before going live. For extra safety, set `setOraclePriceBounds` so an obviously wrong price reverts instead of executing.
 
 If a feed is stale, returns a bad value, or (on L2s) the sequencer is down, the purchase **reverts** rather than using an outdated price — see [Security Considerations](#%EF%B8%8F-security-considerations).
+
+## ⏳ Cooling-off / Withdrawal (Widerruf)
+
+An **optional** consumer cooling-off period. It is **off by default** (`withdrawalPeriod = 0`), in which case purchases behave exactly as described above — mint immediately, forward payment. When an admin sets a period (e.g. 14 days), non-exempt purchases route through an escrow flow instead:
+
+```
+purchase (sign)          window (e.g. 14 days)            settle
+   │                            │                            │
+   ▼                            ▼                            ▼
+payment escrowed,        withdrawOrder → full refund,   settleOrder → MINT tokens
+tokens reserved,         nothing minted                 + forward payment
+NO MINT (event:                                         (allowed by anyone
+PurchaseReserved)                                        once window closes)
+```
+
+- **When does minting happen?** Immediately for instant/exempt purchases; otherwise **only at `settleOrder`, after the window** — or never, if the buyer withdraws.
+- **Price is snapshotted at purchase** — the buyer receives exactly what was quoted when they signed, regardless of later rate changes.
+- **The period is optional at two levels:** globally (`setWithdrawalPeriod(0)` disables it) and per-buyer (`setWithdrawalExempt(buyer, true)` lets verified professional investors settle instantly). Changing the period never affects existing orders — each keeps the `unlockTime` it was created with.
+- **Refunds are always reachable:** `withdrawOrder` works even while the sale is paused.
+- **Escrowed funds are protected:** `emergencyWithdraw` can only take the balance *above* what's held for pending refunds (`escrowedByToken`), so admin operations can never touch money owed to buyers.
+- **Reservations count against caps:** pending orders count toward `hardCap` and per-user limits, so many open orders can't oversell; the reservation is released on withdrawal and converted to real supply on settlement.
+
+> This is a **good process, not an unconditional guarantee.** Because the contract is upgradeable, the refund behavior is only as strong as the upgrade governance — hold the proxy admin in a multisig/timelock (see [Upgradeability](#-upgradeability) and [Security Considerations](#%EF%B8%8F-security-considerations)). Whether a company-owned, code-enforced escrow during the window constitutes "custody," and whether the Widerrufsrecht applies to your offering at all (MiCA Art. 13 / §312g BGB and their exceptions), are legal questions for your counsel — the contract gives you the mechanism, not the legal determination.
 
 ## 🔄 Upgradeability
 

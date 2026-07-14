@@ -448,6 +448,46 @@ ORDER_ID=$(cast keccak "eth-order-456")
 cast send $TOKEN_SALE_ADDRESS "purchaseWithETH(uint256,bytes32)" <MIN_TOKENS_OUT> $ORDER_ID --value 100000000000000000 --private-key $PRIVATE_KEY --rpc-url $RPC_URL
 ```
 
+**Note on cooling-off:** if a withdrawal period is active (see section 9a) and the buyer is not exempt, these calls do **not** mint immediately — they escrow the payment and reserve the tokens. The `orderId` (uint256) needed to withdraw/settle is emitted in the `PurchaseReserved` event.
+
+---
+
+## 9a. Cooling-off / Withdrawal (Widerruf)
+
+### Configure the cooling-off period (requires ADMIN_ROLE)
+```bash
+# Enable a 14-day cooling-off window (14 * 24 * 60 * 60 = 1209600 seconds)
+cast send $TOKEN_SALE_ADDRESS "setWithdrawalPeriod(uint256)" 1209600 --private-key $PRIVATE_KEY --rpc-url $RPC_URL
+
+# Disable cooling-off (0 = instant minting, the default)
+cast send $TOKEN_SALE_ADDRESS "setWithdrawalPeriod(uint256)" 0 --private-key $PRIVATE_KEY --rpc-url $RPC_URL
+```
+
+### Exempt a buyer from cooling-off (e.g. professional investors)
+```bash
+cast send $TOKEN_SALE_ADDRESS "setWithdrawalExempt(address,bool)" <BUYER> true --private-key $PRIVATE_KEY --rpc-url $RPC_URL
+```
+
+### Withdraw / cancel a pending order (called by the buyer, before the window closes)
+```bash
+cast send $TOKEN_SALE_ADDRESS "withdrawOrder(uint256)" <ORDER_ID> --private-key $BUYER_PRIVATE_KEY --rpc-url $RPC_URL
+```
+
+### Settle a pending order (permissionless, after the window closes)
+```bash
+# Forwards the escrowed payment and mints the tokens to the buyer
+cast send $TOKEN_SALE_ADDRESS "settleOrder(uint256)" <ORDER_ID> --private-key $PRIVATE_KEY --rpc-url $RPC_URL
+```
+
+### Read cooling-off state
+```bash
+cast call $TOKEN_SALE_ADDRESS "withdrawalPeriod()(uint256)" --rpc-url $RPC_URL
+cast call $TOKEN_SALE_ADDRESS "withdrawalExempt(address)(bool)" <BUYER> --rpc-url $RPC_URL
+cast call $TOKEN_SALE_ADDRESS "escrowedByToken(address)(uint256)" <TOKEN_ADDRESS> --rpc-url $RPC_URL
+# Order fields: buyer, paymentToken, paymentAmount, tokensOwed, unlockTime, orderRef, status(0..3)
+cast call $TOKEN_SALE_ADDRESS "pendingOrders(uint256)(address,address,uint256,uint256,uint256,bytes32,uint8)" <ORDER_ID> --rpc-url $RPC_URL
+```
+
 ---
 
 ## 10. Admin Utility Functions
