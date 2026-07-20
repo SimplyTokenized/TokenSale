@@ -41,14 +41,15 @@ contract TokenSale is Initializable, AccessControlUpgradeable, ReentrancyGuardTr
     // Whitelist management
     mapping(address => bool) public whitelist;
 
-    // Payment token configuration
-    // paymentToken => tokensPerPayment (how many base tokens per 1 unit of payment token)
-    // For ETH, use address(0) as the key
-    // Rate is stored as: base tokens (18 decimals) per 1 payment token unit
-    // Admin must calculate rate accounting for payment token decimals
-    // Example: 1 USDC (6 decimals) = 100 BASE (18 decimals)
-    // Rate = 100 * 10^18, calculation: (paymentAmount * rate) / 10^paymentTokenDecimals
-    mapping(address => uint256) public paymentTokenRates;
+    // Payment token configuration (manual mode)
+    // paymentToken => price: how many smallest units of the payment token buy 1 whole base
+    // token (10**18 base units). Stored this way (instead of a pre-divided "tokens per
+    // payment unit" rate) so a purchase needs only ONE truncating division, not two -
+    // avoiding compounded rounding for prices like "3 USDC = 1 BASE" (see PR discussion).
+    // For ETH, use address(0) as the key.
+    // Example: 1 BASE costs 3 USDC (6 decimals) => price = 3 * 10^6
+    // Calculation: baseTokensOut = (paymentAmount * 10**18) / price
+    mapping(address => uint256) public paymentTokenPrices;
     mapping(address => uint8) public paymentTokenDecimals; // Store decimals for each payment token
     mapping(address => bool) public allowedPaymentTokens;
 
@@ -133,9 +134,9 @@ contract TokenSale is Initializable, AccessControlUpgradeable, ReentrancyGuardTr
         uint256 baseTokensReceived,
         bytes32 orderId
     );
-    event PaymentTokenAdded(address indexed token, uint256 rate);
+    event PaymentTokenAdded(address indexed token, uint256 price);
     event PaymentTokenRemoved(address indexed token);
-    event PaymentTokenRateUpdated(address indexed token, uint256 newRate);
+    event PaymentTokenPriceUpdated(address indexed token, uint256 newPrice);
     event WhitelistAdded(address indexed account);
     event WhitelistRemoved(address indexed account);
     event WhitelistRequirementUpdated(bool requireWhitelist);
@@ -219,20 +220,20 @@ contract TokenSale is Initializable, AccessControlUpgradeable, ReentrancyGuardTr
     // ============ Admin Functions ============
 
     /**
-     * @dev Add a payment token with its rate
+     * @dev Add a payment token with its manual price
      * @param paymentToken Address of the payment token (address(0) for ETH)
-     * @param tokensPerPayment How many base tokens (18 decimals) per 1 unit of payment token
+     * @param price How many smallest units of the payment token buy 1 whole base token (10**18 base units)
      * @param paymentTokenDecimals_ Decimals of the payment token (18 for ETH).
      *                        Verified against the token's own decimals() when the token exposes it.
-     *                        Example: If 1 USDC (6 decimals) = 100 base tokens (18 decimals)
-     *                        Then tokensPerPayment = 100 * 10^18, paymentTokenDecimals_ = 6
-     *                        Calculation: (paymentAmount * tokensPerPayment) / 10^paymentTokenDecimals_
+     *                        Example: If 1 base token (18 decimals) costs 3 USDC (6 decimals)
+     *                        Then price = 3 * 10^6, paymentTokenDecimals_ = 6
+     *                        Calculation: baseTokensOut = (paymentAmount * 10**18) / price
      */
-    function addPaymentToken(address paymentToken, uint256 tokensPerPayment, uint8 paymentTokenDecimals_)
+    function addPaymentToken(address paymentToken, uint256 price, uint8 paymentTokenDecimals_)
         external
         onlyRole(ADMIN_ROLE)
     {
-        require(tokensPerPayment > 0, "TokenSale: invalid rate");
+        require(price > 0, "TokenSale: invalid price");
         require(paymentTokenDecimals_ <= 18, "TokenSale: invalid decimals");
         if (paymentToken == address(0)) {
             require(paymentTokenDecimals_ == 18, "TokenSale: ETH decimals must be 18");
@@ -244,9 +245,9 @@ contract TokenSale is Initializable, AccessControlUpgradeable, ReentrancyGuardTr
             }
         }
         allowedPaymentTokens[paymentToken] = true;
-        paymentTokenRates[paymentToken] = tokensPerPayment;
+        paymentTokenPrices[paymentToken] = price;
         paymentTokenDecimals[paymentToken] = paymentTokenDecimals_;
-        emit PaymentTokenAdded(paymentToken, tokensPerPayment);
+        emit PaymentTokenAdded(paymentToken, price);
     }
 
     /**
@@ -260,7 +261,7 @@ contract TokenSale is Initializable, AccessControlUpgradeable, ReentrancyGuardTr
         require(allowedPaymentTokens[paymentToken], "TokenSale: token not allowed");
         require(paymentToken != basePaymentToken || baseRate == 0, "TokenSale: cannot remove base payment token");
         allowedPaymentTokens[paymentToken] = false;
-        delete paymentTokenRates[paymentToken];
+        delete paymentTokenPrices[paymentToken];
         delete paymentTokenDecimals[paymentToken];
         delete paymentTokenOracles[paymentToken];
         delete useOracleForToken[paymentToken];
@@ -271,15 +272,15 @@ contract TokenSale is Initializable, AccessControlUpgradeable, ReentrancyGuardTr
     }
 
     /**
-     * @dev Update the rate for a payment token
+     * @dev Update the manual price for a payment token
      * @param paymentToken Address of the payment token
-     * @param newRate New rate (base tokens per payment token)
+     * @param newPrice New price (smallest units of the payment token per 1 whole base token)
      */
-    function updatePaymentTokenRate(address paymentToken, uint256 newRate) external onlyRole(ADMIN_ROLE) {
+    function updatePaymentTokenPrice(address paymentToken, uint256 newPrice) external onlyRole(ADMIN_ROLE) {
         require(allowedPaymentTokens[paymentToken], "TokenSale: token not allowed");
-        require(newRate > 0, "TokenSale: invalid rate");
-        paymentTokenRates[paymentToken] = newRate;
-        emit PaymentTokenRateUpdated(paymentToken, newRate);
+        require(newPrice > 0, "TokenSale: invalid price");
+        paymentTokenPrices[paymentToken] = newPrice;
+        emit PaymentTokenPriceUpdated(paymentToken, newPrice);
     }
 
     /**
@@ -668,31 +669,41 @@ contract TokenSale is Initializable, AccessControlUpgradeable, ReentrancyGuardTr
     // ============ Internal Oracle Functions ============
 
     /**
-     * @dev Get the current rate for a payment token (from base rate, oracle, or manual rate)
+     * @dev Quote the number of base tokens received for a payment amount (from base rate,
+     *      oracle, or manual price).
      * @notice Fail-closed: when oracle mode is enabled for a token, an oracle failure
      *         (stale price, invalid answer, out-of-bounds price, sequencer down) reverts the
-     *         purchase instead of silently falling back to a possibly outdated manual rate.
-     *         To sell at the manual rate the admin must explicitly call setOracleMode(token, false).
+     *         purchase instead of silently falling back to a possibly outdated manual price.
+     *         To sell at the manual price the admin must explicitly call setOracleMode(token, false).
+     * @notice Base-rate and oracle-derived quotes use a "tokens per payment unit" rate, which is
+     *         inherently approximate for oracle-derived prices (the ratio of two independent live
+     *         feeds is not generally an exact fraction). Manual prices instead store the exact
+     *         payment-per-base-token price and use a single division, so exact prices (e.g. 3 USDC
+     *         = 1 BASE) yield exact results.
      * @param paymentToken Address of the payment token (address(0) for ETH)
-     * @return rate Rate in base tokens (18 decimals) per 1 unit of payment token
-     * @return decimals Decimals of the payment token
+     * @param paymentAmount Amount of payment token (with its decimals)
+     * @return baseTokensOut Amount of base tokens (18 decimals) the payment buys
      */
-    function getRate(address paymentToken) internal view returns (uint256 rate, uint8 decimals) {
-        decimals = paymentTokenDecimals[paymentToken];
+    function _quoteBaseTokensOut(address paymentToken, uint256 paymentAmount)
+        internal
+        view
+        returns (uint256 baseTokensOut)
+    {
+        uint8 decimals = paymentTokenDecimals[paymentToken];
 
         // If this is the base payment token, use base rate directly (no oracle needed)
         if (paymentToken == basePaymentToken && baseRate > 0) {
-            return (baseRate, decimals);
+            return (paymentAmount * baseRate) / (10 ** decimals);
         }
 
         // Oracle mode: derive the rate from the configured feeds, reverting on any failure
         if (useOracleForToken[paymentToken] && paymentTokenOracles[paymentToken] != address(0)) {
-            return (_getOracleRate(paymentToken), decimals);
+            return (paymentAmount * _getOracleRate(paymentToken)) / (10 ** decimals);
         }
 
-        // Manual mode
-        rate = paymentTokenRates[paymentToken];
-        return (rate, decimals);
+        // Manual mode: exact price (payment units per 1 whole base token), single division
+        uint256 price = paymentTokenPrices[paymentToken];
+        return (paymentAmount * (10 ** 18)) / price;
     }
 
     /**
@@ -978,11 +989,8 @@ contract TokenSale is Initializable, AccessControlUpgradeable, ReentrancyGuardTr
             usedOrderIds[msg.sender][orderId] = true;
         }
 
-        // Get current rate (from base rate, oracle, or manual rate)
-        (uint256 rate, uint8 decimals) = getRate(paymentToken);
-        // Rate is stored as: base tokens (18 decimals) per 1 payment token unit
-        // Calculation: (paymentAmount * rate) / 10^decimals
-        baseTokensOut = (paymentAmount * rate) / (10 ** decimals);
+        // Quote base tokens out (from base rate, oracle, or manual price)
+        baseTokensOut = _quoteBaseTokensOut(paymentToken, paymentAmount);
 
         require(baseTokensOut > 0, "TokenSale: insufficient payment");
 
@@ -1067,8 +1075,7 @@ contract TokenSale is Initializable, AccessControlUpgradeable, ReentrancyGuardTr
      */
     function calculateTokens(address paymentToken, uint256 paymentAmount) external view returns (uint256 baseTokens) {
         require(allowedPaymentTokens[paymentToken], "TokenSale: payment token not allowed");
-        (uint256 rate, uint8 decimals) = getRate(paymentToken);
-        baseTokens = (paymentAmount * rate) / (10 ** decimals);
+        baseTokens = _quoteBaseTokensOut(paymentToken, paymentAmount);
     }
 
     /**

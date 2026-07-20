@@ -99,20 +99,19 @@ contract MockChainlinkOracle is AggregatorV3Interface {
             usdc.mint(user2, 100000 * 10 ** usdc.decimals());
 
             // Add payment tokens
-            // Rate: 1 USDC (6 decimals) = 100 BASE tokens (18 decimals)
-            // Rate = 100 * 10^18 (base tokens per 1 USDC unit)
-            // Calculation: (paymentAmount * rate) / 10^6
-            uint256 usdcRate = 100 * 10 ** 18; // 100 base tokens per 1 USDC
+            // Price: 1 BASE token (18 decimals) costs 0.01 USDC (6 decimals) => 100 BASE per 1 USDC
+            // price = 0.01 * 10^6 = 10000 (smallest units of USDC per 1 whole BASE token)
+            // Calculation: baseTokensOut = (paymentAmount * 10^18) / price
+            uint256 usdcPrice = 10000; // 100 base tokens per 1 USDC
             vm.prank(admin);
-            tokenSale.addPaymentToken(address(usdc), usdcRate, 6);
+            tokenSale.addPaymentToken(address(usdc), usdcPrice, 6);
 
             // Add ETH as payment token
-            // Rate: 1 ETH = 1000 BASE tokens
-            // Rate = 1000 * 10^18 (base tokens per 1 ETH)
-            // Calculation: (paymentAmount * rate) / 10^18
-            uint256 ethRate = 1000 * 10 ** 18; // 1000 base tokens per 1 ETH
+            // Price: 1 BASE token costs 0.001 ETH => 1000 BASE per 1 ETH
+            // price = 0.001 * 10^18 = 10^15 (wei per 1 whole BASE token)
+            uint256 ethPrice = 1 * 10 ** 15; // 1000 base tokens per 1 ETH
             vm.prank(admin);
-            tokenSale.addPaymentToken(address(0), ethRate, 18);
+            tokenSale.addPaymentToken(address(0), ethPrice, 18);
         }
 
         function test_Initialization() public {
@@ -174,19 +173,17 @@ contract MockChainlinkOracle is AggregatorV3Interface {
             vm.stopPrank();
         }
 
-        function test_UpdatePaymentTokenRate() public {
+        function test_UpdatePaymentTokenPrice() public {
             uint256 paymentAmount = 1000 * 10 ** usdc.decimals();
-            uint256 oldRate = tokenSale.paymentTokenRates(address(usdc));
+            uint256 oldPrice = tokenSale.paymentTokenPrices(address(usdc));
 
-            // Update rate to double
-            uint256 newRate = oldRate * 2;
+            // Halve the price (buyer needs less payment per base token => rate doubles)
+            uint256 newPrice = oldPrice / 2;
             vm.prank(admin);
-            tokenSale.updatePaymentTokenRate(address(usdc), newRate);
+            tokenSale.updatePaymentTokenPrice(address(usdc), newPrice);
 
             uint256 expectedTokens = tokenSale.calculateTokens(address(usdc), paymentAmount);
-            // Use payment token decimals (6 for USDC), not 18
-            uint8 paymentDecimals = tokenSale.paymentTokenDecimals(address(usdc));
-            assertEq(expectedTokens, (paymentAmount * newRate) / (10 ** paymentDecimals));
+            assertEq(expectedTokens, (paymentAmount * (10 ** 18)) / newPrice);
         }
 
         function test_RemovePaymentToken() public {
@@ -644,10 +641,10 @@ contract MockChainlinkOracle is AggregatorV3Interface {
             tokenSale.removePaymentToken(address(usdc));
         }
 
-        function test_NonAdminCannotUpdatePaymentTokenRate() public {
+        function test_NonAdminCannotUpdatePaymentTokenPrice() public {
             vm.prank(user1);
             vm.expectRevert();
-            tokenSale.updatePaymentTokenRate(address(usdc), 200 * 10 ** 18);
+            tokenSale.updatePaymentTokenPrice(address(usdc), 5000);
         }
 
         function test_NonAdminCannotUpdateWhitelistRequirement() public {
@@ -1062,7 +1059,7 @@ contract MockChainlinkOracle is AggregatorV3Interface {
             assertEq(tokenSale.saleEndTime(), endTime);
 
             uint8 usdcDecimals = tokenSale.paymentTokenDecimals(address(usdc));
-            uint256 rate = tokenSale.paymentTokenRates(address(usdc));
+            uint256 price = tokenSale.paymentTokenPrices(address(usdc));
 
             // Try to purchase before sale starts (should fail)
             uint256 paymentAmount = 10 * 10 ** usdcDecimals; // 10 USDC = 1,000 tokens
@@ -1093,7 +1090,7 @@ contract MockChainlinkOracle is AggregatorV3Interface {
             vm.stopPrank();
 
             assertGt(tokensReceived, 0);
-            assertEq(tokensReceived, (validPayment * rate) / (10 ** usdcDecimals));
+            assertEq(tokensReceived, (validPayment * (10 ** 18)) / price);
 
             // Try to exceed user max purchase (should fail)
             // 20 USDC = 2,000 tokens, total would be 6,000 tokens > 5,000 limit
@@ -1288,10 +1285,21 @@ contract MockChainlinkOracle is AggregatorV3Interface {
             uint256 paymentAmount = 1000 * 10 ** usdc.decimals();
 
             uint256 calculated = tokenSale.calculateTokens(address(usdc), paymentAmount);
-            uint256 expected = (paymentAmount * tokenSale.paymentTokenRates(address(usdc)))
-                / (10 ** tokenSale.paymentTokenDecimals(address(usdc)));
+            uint256 expected = (paymentAmount * (10 ** 18)) / tokenSale.paymentTokenPrices(address(usdc));
 
             assertEq(calculated, expected);
+        }
+
+        function test_ManualPriceGivesExactTokensForIndivisibleRate() public {
+            // Regression test: 1 BASE token priced at exactly 3 USDC. The old "tokens per
+            // payment unit" rate had to pre-round 1/3, so 3 USDC yielded 0.999999999999999999
+            // BASE instead of exactly 1. Price-based storage divides only once, so this is exact.
+            MockERC20 token = new MockERC20("Test Token", "TEST", 6);
+            vm.prank(admin);
+            tokenSale.addPaymentToken(address(token), 3 * 10 ** 6, 6); // 3 units (6 decimals) per 1 BASE
+
+            uint256 threeUnits = 3 * 10 ** 6;
+            assertEq(tokenSale.calculateTokens(address(token), threeUnits), 1 * 10 ** 18);
         }
 
         function test_GetUserPurchases() public {
@@ -1354,12 +1362,12 @@ contract MockChainlinkOracle is AggregatorV3Interface {
             tokenSale.updatePaymentRecipient(address(0));
         }
 
-        function test_AddPaymentTokenInvalidRate() public {
+        function test_AddPaymentTokenInvalidPrice() public {
             MockERC20 token = new MockERC20("Test Token", "TEST", 18);
 
-            // Try to add payment token with zero rate (should fail)
+            // Try to add payment token with zero price (should fail)
             vm.prank(admin);
-            vm.expectRevert("TokenSale: invalid rate");
+            vm.expectRevert("TokenSale: invalid price");
             tokenSale.addPaymentToken(address(token), 0, 18);
         }
 
@@ -1389,20 +1397,20 @@ contract MockChainlinkOracle is AggregatorV3Interface {
             tokenSale.configureOracle(address(usdc), address(0), 3600);
         }
 
-        function test_UpdatePaymentTokenRateInvalidRate() public {
-            // Try to update rate to zero (should fail)
+        function test_UpdatePaymentTokenPriceInvalidPrice() public {
+            // Try to update price to zero (should fail)
             vm.prank(admin);
-            vm.expectRevert("TokenSale: invalid rate");
-            tokenSale.updatePaymentTokenRate(address(usdc), 0);
+            vm.expectRevert("TokenSale: invalid price");
+            tokenSale.updatePaymentTokenPrice(address(usdc), 0);
         }
 
-        function test_UpdatePaymentTokenRatePaymentTokenNotAllowed() public {
+        function test_UpdatePaymentTokenPricePaymentTokenNotAllowed() public {
             MockERC20 token = new MockERC20("Test Token", "TEST", 18);
 
-            // Try to update rate for token that's not added as payment token (should fail)
+            // Try to update price for token that's not added as payment token (should fail)
             vm.prank(admin);
             vm.expectRevert("TokenSale: token not allowed");
-            tokenSale.updatePaymentTokenRate(address(token), 100 * 10 ** 18);
+            tokenSale.updatePaymentTokenPrice(address(token), 100 * 10 ** 18);
         }
 
         function test_RemoveOraclePaymentTokenNotAllowed() public {
@@ -1542,9 +1550,8 @@ contract MockChainlinkOracle is AggregatorV3Interface {
 
             // Purchase exactly at cap
             // Need to calculate payment amount that results in exactly additionalTokens tokens
-            uint256 rate = tokenSale.paymentTokenRates(address(usdc));
-            uint8 decimals = tokenSale.paymentTokenDecimals(address(usdc));
-            uint256 paymentForCap = (additionalTokens * (10 ** decimals)) / rate;
+            uint256 price = tokenSale.paymentTokenPrices(address(usdc));
+            uint256 paymentForCap = (additionalTokens * price) / (10 ** 18);
 
             // Purchase slightly less first
             uint256 paymentAmount = paymentForCap - 1;
@@ -1556,7 +1563,7 @@ contract MockChainlinkOracle is AggregatorV3Interface {
             // Now purchase the remaining amount (should succeed)
             uint256 currentSupply = baseToken.totalSupply();
             uint256 remaining = cap - currentSupply;
-            uint256 remainingPayment = (remaining * (10 ** decimals)) / rate;
+            uint256 remainingPayment = (remaining * price) / (10 ** 18);
 
             vm.startPrank(user1);
             tokenSale.purchaseWithToken(address(usdc), remainingPayment, 0, bytes32(0));
@@ -1643,9 +1650,10 @@ contract MockChainlinkOracle is AggregatorV3Interface {
             uint256 paymentAmount = 10 * 10 ** usdcDecimals; // 1,000 tokens at the current rate
             uint256 expectedTokens = tokenSale.calculateTokens(address(usdc), paymentAmount);
 
-            // Rate worsens after the buyer submitted their transaction
+            // Rate worsens after the buyer submitted their transaction (price doubles => tokens halve)
+            uint256 doubledPrice = tokenSale.paymentTokenPrices(address(usdc)) * 2;
             vm.prank(admin);
-            tokenSale.updatePaymentTokenRate(address(usdc), 50 * 10 ** 18); // Halved
+            tokenSale.updatePaymentTokenPrice(address(usdc), doubledPrice);
 
             vm.startPrank(user1);
             usdc.approve(address(tokenSale), paymentAmount * 2);
@@ -1686,7 +1694,7 @@ contract MockChainlinkOracle is AggregatorV3Interface {
             tokenSale.removePaymentToken(address(usdc));
 
             // All configuration is cleared so a re-add starts clean
-            assertEq(tokenSale.paymentTokenRates(address(usdc)), 0);
+            assertEq(tokenSale.paymentTokenPrices(address(usdc)), 0);
             assertEq(tokenSale.paymentTokenDecimals(address(usdc)), 0);
             assertEq(tokenSale.paymentTokenOracles(address(usdc)), address(0));
             assertFalse(tokenSale.useOracleForToken(address(usdc)));
@@ -1694,14 +1702,14 @@ contract MockChainlinkOracle is AggregatorV3Interface {
             assertEq(tokenSale.oracleMinPrice(address(usdc)), 0);
             assertEq(tokenSale.oracleMaxPrice(address(usdc)), 0);
 
-            // Re-add uses the fresh manual rate, not the stale oracle configuration
+            // Re-add uses the fresh manual price, not the stale oracle configuration
             vm.prank(admin);
-            tokenSale.addPaymentToken(address(usdc), 200 * 10 ** 18, 6);
+            tokenSale.addPaymentToken(address(usdc), 5000, 6); // 200 base tokens per 1 USDC
             assertFalse(tokenSale.useOracleForToken(address(usdc)));
 
             uint256 paymentAmount = 10 * 10 ** 6;
             uint256 calculated = tokenSale.calculateTokens(address(usdc), paymentAmount);
-            assertEq(calculated, (paymentAmount * 200 * 10 ** 18) / 10 ** 6);
+            assertEq(calculated, (paymentAmount * (10 ** 18)) / 5000);
         }
 
         function test_CannotRemoveActiveBasePaymentToken() public {
@@ -2119,7 +2127,7 @@ contract MockChainlinkOracle is AggregatorV3Interface {
 
             // Rate changes after purchase; settlement must honor the snapshot
             vm.prank(admin);
-            tokenSale.updatePaymentTokenRate(address(usdc), 50 * 10 ** 18);
+            tokenSale.updatePaymentTokenPrice(address(usdc), 20000);
 
             vm.warp(block.timestamp + WD_PERIOD);
             tokenSale.settleOrder(1);

@@ -63,9 +63,9 @@ cast call $TOKEN_SALE_ADDRESS "allowedPaymentTokens(address)(bool)" <TOKEN_ADDRE
 cast call $TOKEN_SALE_ADDRESS "allowedPaymentTokens(address)(bool)" 0x0000000000000000000000000000000000000000 --rpc-url $RPC_URL
 ```
 
-### Get Payment Token Rate
+### Get Payment Token Price
 ```bash
-cast call $TOKEN_SALE_ADDRESS "paymentTokenRates(address)(uint256)" <TOKEN_ADDRESS> --rpc-url $RPC_URL
+cast call $TOKEN_SALE_ADDRESS "paymentTokenPrices(address)(uint256)" <TOKEN_ADDRESS> --rpc-url $RPC_URL
 ```
 
 ### Get Payment Token Decimals
@@ -182,20 +182,21 @@ cast send $TOKEN_SALE_ADDRESS "revokeRole(bytes32,address)" $ROLE <ADDRESS> --pr
 
 ### Add Payment Token
 ```bash
-cast send $TOKEN_SALE_ADDRESS "addPaymentToken(address,uint256,uint8)" <TOKEN_ADDRESS> <RATE> <DECIMALS> --private-key $PRIVATE_KEY --rpc-url $RPC_URL
+cast send $TOKEN_SALE_ADDRESS "addPaymentToken(address,uint256,uint8)" <TOKEN_ADDRESS> <PRICE> <DECIMALS> --private-key $PRIVATE_KEY --rpc-url $RPC_URL
+```
+`PRICE` is how many smallest units of the payment token buy 1 whole base token (10^18 base units) — an exact price, not a pre-divided "tokens per payment" rate.
+
+**Example (add ETH so 1 ETH = 1000 tokens, 18 decimals):**
+```bash
+# Price: 10^15 wei per 1 base token (1000 tokens per 1 ETH)
+cast send $TOKEN_SALE_ADDRESS "addPaymentToken(address,uint256,uint8)" 0x0000000000000000000000000000000000000000 1000000000000000 18 --private-key $PRIVATE_KEY --rpc-url $RPC_URL
 ```
 
-**Example (add ETH with rate 1 ETH = 1000 tokens, 18 decimals):**
+**Example (add USDC so 1 USDC = 100 tokens, 6 decimals):**
 ```bash
-# Rate: 1000 * 10^18 (1000 tokens per 1 ETH)
-cast send $TOKEN_SALE_ADDRESS "addPaymentToken(address,uint256,uint8)" 0x0000000000000000000000000000000000000000 1000000000000000000000 18 --private-key $PRIVATE_KEY --rpc-url $RPC_URL
-```
-
-**Example (add USDC with rate 1 USDC = 100 tokens, 6 decimals):**
-```bash
-# Rate: 100 * 10^18 (100 tokens per 1 USDC)
+# Price: 10000 (0.01 USDC per 1 base token, i.e. 100 tokens per 1 USDC)
 # USDC has 6 decimals
-cast send $TOKEN_SALE_ADDRESS "addPaymentToken(address,uint256,uint8)" <USDC_ADDRESS> 100000000000000000000 6 --private-key $PRIVATE_KEY --rpc-url $RPC_URL
+cast send $TOKEN_SALE_ADDRESS "addPaymentToken(address,uint256,uint8)" <USDC_ADDRESS> 10000 6 --private-key $PRIVATE_KEY --rpc-url $RPC_URL
 ```
 
 ### Remove Payment Token
@@ -203,9 +204,9 @@ cast send $TOKEN_SALE_ADDRESS "addPaymentToken(address,uint256,uint8)" <USDC_ADD
 cast send $TOKEN_SALE_ADDRESS "removePaymentToken(address)" <TOKEN_ADDRESS> --private-key $PRIVATE_KEY --rpc-url $RPC_URL
 ```
 
-### Update Payment Token Rate
+### Update Payment Token Price
 ```bash
-cast send $TOKEN_SALE_ADDRESS "updatePaymentTokenRate(address,uint256)" <TOKEN_ADDRESS> <NEW_RATE> --private-key $PRIVATE_KEY --rpc-url $RPC_URL
+cast send $TOKEN_SALE_ADDRESS "updatePaymentTokenPrice(address,uint256)" <TOKEN_ADDRESS> <NEW_PRICE> --private-key $PRIVATE_KEY --rpc-url $RPC_URL
 ```
 
 ---
@@ -535,9 +536,9 @@ cast call $TOKEN_SALE_ADDRESS "requireWhitelist()(bool)" --rpc-url $RPC_URL
 MINTER_ROLE=$(cast keccak "MINTER_ROLE")
 cast send $BASE_TOKEN_ADDRESS "grantRole(bytes32,address)" $MINTER_ROLE $TOKEN_SALE_ADDRESS --private-key $PRIVATE_KEY --rpc-url $RPC_URL
 
-# 4. Add ETH as payment token (rate: 1 ETH = 1000 tokens)
+# 4. Add ETH as payment token (price: 1 ETH = 1000 tokens => 10^15 wei per token)
 cast send $TOKEN_SALE_ADDRESS "addPaymentToken(address,uint256,uint8)" \
-  0x0000000000000000000000000000000000000000 1000000000000000000000 18 \
+  0x0000000000000000000000000000000000000000 1000000000000000 18 \
   --private-key $PRIVATE_KEY --rpc-url $RPC_URL
 
 # 5. Check if ETH is allowed

@@ -80,15 +80,15 @@ npm run deploy:nodejs   # Node.js/ethers deployment path (see DEPLOY_NODEJS.md)
 - `getUserPurchases(address user)` / `totalPurchased(address)` — total base tokens a user purchased through the sale
 - `getUserPurchasesByToken(address user, address paymentToken)` — purchases per payment token
 - `totalSales()`, `revenueByToken(address)` — sale-wide statistics
-- `paymentTokenRates(address)`, `paymentTokenDecimals(address)`, `allowedPaymentTokens(address)` — payment token configuration
+- `paymentTokenPrices(address)`, `paymentTokenDecimals(address)`, `allowedPaymentTokens(address)` — payment token configuration
 - `usedOrderIds(address buyer, bytes32 orderId)` — whether a buyer has used an order ID
 
 ### Admin Functions
 
 #### Payment Token Management
-- `addPaymentToken(address paymentToken, uint256 tokensPerPayment, uint8 paymentTokenDecimals)` — add a payment token (decimals are verified against the token contract when available; ETH must be added with 18 decimals)
-- `removePaymentToken(address paymentToken)` — remove a payment token and **all** of its configuration (rate, decimals, oracle settings, price bounds); the active base payment token cannot be removed
-- `updatePaymentTokenRate(address paymentToken, uint256 newRate)` — update a manual rate
+- `addPaymentToken(address paymentToken, uint256 price, uint8 paymentTokenDecimals)` — add a payment token. `price` is how many smallest units of the payment token buy 1 whole base token (10**18 base units); decimals are verified against the token contract when available; ETH must be added with 18 decimals
+- `removePaymentToken(address paymentToken)` — remove a payment token and **all** of its configuration (price, decimals, oracle settings, price bounds); the active base payment token cannot be removed
+- `updatePaymentTokenPrice(address paymentToken, uint256 newPrice)` — update a manual price
 
 #### Base Rate & Oracle Pricing
 - `setBaseRate(address basePaymentToken, uint256 baseRate)` — set the anchor: how many base tokens one unit of the base payment token buys
@@ -144,11 +144,15 @@ baseToken.grantRole(MINTER_ROLE, tokenSaleProxyAddress);
 ### 3. Add Payment Tokens
 
 ```solidity
-// 1 USDC (6 decimals) = 100 BASE tokens (18 decimals)
-tokenSale.addPaymentToken(usdcAddress, 100 * 10**18, 6);
+// price = smallest units of the payment token that buy 1 whole base token (10**18 base units).
+// This is an exact price (not a pre-divided "tokens per payment" rate), so purchases at
+// this price round only once, in the purchase calculation itself.
 
-// 1 ETH = 1000 BASE tokens
-tokenSale.addPaymentToken(address(0), 1000 * 10**18, 18);
+// 1 BASE token costs 0.01 USDC (6 decimals) => 100 BASE per 1 USDC
+tokenSale.addPaymentToken(usdcAddress, 10000, 6);
+
+// 1 BASE token costs 0.001 ETH => 1000 BASE per 1 ETH
+tokenSale.addPaymentToken(address(0), 10**15, 18);
 ```
 
 ### 4. (Optional) Configure Oracle Pricing
