@@ -4,6 +4,8 @@ pragma solidity 0.8.27;
 import {Test, console} from "forge-std/Test.sol";
 import {TokenSale} from "../src/TokenSale.sol";
 import {Upgrades} from "@openzeppelin-foundry-upgrades/Upgrades.sol";
+import {ERC1967Proxy} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
+import {Initializable} from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import {AccessControl} from "@openzeppelin/contracts/access/AccessControl.sol";
@@ -1285,7 +1287,7 @@ contract MockChainlinkOracle is AggregatorV3Interface {
             uint256 paymentAmount = 1000 * 10 ** usdc.decimals();
 
             uint256 calculated = tokenSale.calculateTokens(address(usdc), paymentAmount);
-            uint256 expected = (paymentAmount * (10 ** 18)) / tokenSale.paymentTokenPrices(address(usdc));
+            uint256 expected = (paymentAmount * (10 ** tokenSale.baseTokenDecimals())) / tokenSale.paymentTokenPrices(address(usdc));
 
             assertEq(calculated, expected);
         }
@@ -2149,5 +2151,122 @@ contract MockChainlinkOracle is AggregatorV3Interface {
             vm.expectRevert("TokenSale: orderId already used");
             tokenSale.purchaseWithToken(address(usdc), paymentAmount, 0, orderRef);
             vm.stopPrank();
+        }
+
+        // ============ Base Token Decimals ============
+
+        /// @dev Deploy a fresh sale for a base token with the given decimals; USDC priced at 3 USDC per whole token
+        function _deploySaleWithBaseDecimals(uint8 baseDecimals) internal returns (TokenSale sale, MockERC20 base) {
+            base = new MockERC20("Base Token", "BASE", baseDecimals);
+            sale = TokenSale(
+                Upgrades.deployTransparentProxy(
+                    "TokenSale.sol:TokenSale",
+                    admin,
+                    abi.encodeCall(TokenSale.initialize, (address(base), paymentRecipient, admin))
+                )
+            );
+            base.grantRole(keccak256("MINTER_ROLE"), address(sale));
+            sale.addPaymentToken(address(usdc), 3 * 10 ** 6, 6); // 1 whole BASE = 3 USDC
+        }
+
+        function _buyWithUsdc(TokenSale sale, uint256 paymentAmount) internal returns (uint256 tokensReceived) {
+            vm.startPrank(user1);
+            usdc.approve(address(sale), paymentAmount);
+            tokensReceived = sale.purchaseWithToken(address(usdc), paymentAmount, 0, bytes32(0));
+            vm.stopPrank();
+        }
+
+        function test_BaseTokenDecimalsReadOnInitialize() public {
+            assertEq(tokenSale.baseTokenDecimals(), 18);
+
+            (TokenSale sale0,) = _deploySaleWithBaseDecimals(0);
+            assertEq(sale0.baseTokenDecimals(), 0);
+
+            (TokenSale sale6,) = _deploySaleWithBaseDecimals(6);
+            assertEq(sale6.baseTokenDecimals(), 6);
+        }
+
+        function test_RevertWhen_BaseTokenDecimalsAbove18() public {
+            MockERC20 base = new MockERC20("Base Token", "BASE", 19);
+            address implementation = address(new TokenSale());
+            bytes memory initData = abi.encodeCall(TokenSale.initialize, (address(base), paymentRecipient, admin));
+
+            vm.expectRevert("TokenSale: invalid base token decimals");
+            new ERC1967Proxy(implementation, initData);
+        }
+
+        function test_ManualPriceWithZeroDecimalBaseToken() public {
+            (TokenSale sale, MockERC20 base) = _deploySaleWithBaseDecimals(0);
+
+            // 30 USDC at 3 USDC per token = exactly 10 indivisible tokens (not 10 * 10**18)
+            assertEq(_buyWithUsdc(sale, 30 * 10 ** 6), 10);
+            assertEq(base.balanceOf(user1), 10);
+            assertEq(sale.totalSales(), 10);
+
+            // 4 USDC buys 1 token; the fraction rounds down (in favour of the sale)
+            assertEq(sale.calculateTokens(address(usdc), 4 * 10 ** 6), 1);
+
+            // Less than one whole token's worth is rejected
+            vm.startPrank(user1);
+            usdc.approve(address(sale), 2 * 10 ** 6);
+            vm.expectRevert("TokenSale: insufficient payment");
+            sale.purchaseWithToken(address(usdc), 2 * 10 ** 6, 0, bytes32(0));
+            vm.stopPrank();
+        }
+
+        function test_ManualPriceWithSixDecimalBaseToken() public {
+            (TokenSale sale, MockERC20 base) = _deploySaleWithBaseDecimals(6);
+
+            // 30 USDC at 3 USDC per token = 10 whole tokens = 10 * 10**6 base units
+            assertEq(_buyWithUsdc(sale, 30 * 10 ** 6), 10 * 10 ** 6);
+            assertEq(base.balanceOf(user1), 10 * 10 ** 6);
+
+            // 1 USDC buys exactly 1/3 token, truncated to base units
+            assertEq(sale.calculateTokens(address(usdc), 1 * 10 ** 6), 333333);
+
+            // ETH: 1 whole token costs 0.001 ETH => 1 ETH buys 1000 * 10**6 base units
+            sale.addPaymentToken(address(0), 10 ** 15, 18);
+            assertEq(sale.calculateTokens(address(0), 1 ether), 1000 * 10 ** 6);
+        }
+
+        function test_BaseRateWithSixDecimalBaseToken() public {
+            (TokenSale sale,) = _deploySaleWithBaseDecimals(6);
+
+            // baseRate is in base token units: 2 * 10**6 = 2 whole tokens per USDC
+            sale.setBaseRate(address(usdc), 2 * 10 ** 6);
+            assertEq(sale.calculateTokens(address(usdc), 5 * 10 ** 6), 10 * 10 ** 6);
+        }
+
+        function test_OraclePricingWithZeroDecimalBaseToken() public {
+            (TokenSale sale, MockERC20 base) = _deploySaleWithBaseDecimals(0);
+            MockERC20 eur = new MockERC20("Euro", "EUR", 18);
+            MockChainlinkOracle ethUsdOracle = new MockChainlinkOracle(8, 3000 * 10 ** 8, "ETH/USD");
+            MockChainlinkOracle eurUsdOracle = new MockChainlinkOracle(8, 150000000, "EUR/USD"); // 1.50 USD per EUR
+
+            // Anchor: 1 whole (indivisible) token = 1 EUR => baseRate = 10**0
+            sale.addPaymentToken(address(eur), 1, 18);
+            sale.setBaseRate(address(eur), 1);
+            sale.configureOracle(address(eur), address(eurUsdOracle), 0);
+            sale.addPaymentToken(address(0), 10 ** 15, 18);
+            sale.configureOracle(address(0), address(ethUsdOracle), 0);
+
+            // 1 ETH = 3000 / 1.5 = 2000 EUR => 2000 tokens
+            assertEq(sale.calculateTokens(address(0), 1 ether), 2000);
+
+            vm.deal(user1, 1 ether);
+            vm.prank(user1);
+            sale.purchaseWithETH{value: 1 ether}(0, bytes32(0));
+            assertEq(base.balanceOf(user1), 2000);
+        }
+
+        function test_InitializeV2SetsBaseTokenDecimalsOnce() public {
+            (TokenSale sale,) = _deploySaleWithBaseDecimals(6);
+
+            // Upgrade initializer re-reads the base token's decimals (idempotent on fresh deploys)
+            sale.initializeV2();
+            assertEq(sale.baseTokenDecimals(), 6);
+
+            vm.expectRevert(Initializable.InvalidInitialization.selector);
+            sale.initializeV2();
         }
     }

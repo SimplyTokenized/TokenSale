@@ -43,12 +43,12 @@ contract TokenSale is Initializable, AccessControlUpgradeable, ReentrancyGuardTr
 
     // Payment token configuration (manual mode)
     // paymentToken => price: how many smallest units of the payment token buy 1 whole base
-    // token (10**18 base units). Stored this way (instead of a pre-divided "tokens per
+    // token (10**baseTokenDecimals base units). Stored this way (instead of a pre-divided "tokens per
     // payment unit" rate) so a purchase needs only ONE truncating division, not two -
     // avoiding compounded rounding for prices like "3 USDC = 1 BASE" (see PR discussion).
     // For ETH, use address(0) as the key.
     // Example: 1 BASE costs 3 USDC (6 decimals) => price = 3 * 10^6
-    // Calculation: baseTokensOut = (paymentAmount * 10**18) / price
+    // Calculation: baseTokensOut = (paymentAmount * 10**baseTokenDecimals) / price
     mapping(address => uint256) public paymentTokenPrices;
     mapping(address => uint8) public paymentTokenDecimals; // Store decimals for each payment token
     mapping(address => bool) public allowedPaymentTokens;
@@ -70,7 +70,7 @@ contract TokenSale is Initializable, AccessControlUpgradeable, ReentrancyGuardTr
 
     // Base rate configuration - all payment rates derive from this
     address public basePaymentToken; // Base payment token address (e.g., EUR token, or address(0) for ETH)
-    uint256 public baseRate; // Base tokens per base payment token (18 decimals) - e.g., 1 * 10^18 means 1 token = 1 base payment token
+    uint256 public baseRate; // Base token smallest units per 1 whole base payment token - e.g., 1 * 10**baseTokenDecimals means 1 token = 1 base payment token
 
     // Sale statistics
     mapping(address => uint256) public totalPurchased; // Total base tokens purchased per user
@@ -125,6 +125,10 @@ contract TokenSale is Initializable, AccessControlUpgradeable, ReentrancyGuardTr
     mapping(address => uint256) public escrowedByToken; // Payment held in escrow per token (protects emergencyWithdraw)
     mapping(address => uint256) public reservedByUser; // Base tokens reserved by a user's pending orders (per-user limit)
     mapping(uint256 => PendingOrder) public pendingOrders; // orderId => order
+
+    // Decimals of the base token, read from baseToken.decimals() at initialization.
+    // Appended after all earlier state to keep the upgrade storage layout intact.
+    uint8 public baseTokenDecimals;
 
     // Events
     event TokensPurchased(
@@ -200,6 +204,7 @@ contract TokenSale is Initializable, AccessControlUpgradeable, ReentrancyGuardTr
         require(_admin != address(0), "TokenSale: invalid admin");
 
         baseToken = _baseToken;
+        baseTokenDecimals = _readBaseTokenDecimals(_baseToken);
         paymentRecipient = _paymentRecipient;
         requireWhitelist = false; // Whitelist optional by default
         defaultStalenessThreshold = 24 hours; // Default 24 hours staleness threshold
@@ -217,17 +222,32 @@ contract TokenSale is Initializable, AccessControlUpgradeable, ReentrancyGuardTr
         _grantRole(WHITELIST_ROLE, _admin);
     }
 
+    /**
+     * @dev Upgrade initializer for proxies deployed before baseTokenDecimals existed.
+     *      Call via upgradeAndCall when upgrading such a proxy; otherwise baseTokenDecimals
+     *      stays 0 and manual prices would be interpreted for a 0-decimal base token.
+     *      Only reads the base token's own decimals(), so it is safe for anyone to call.
+     */
+    function initializeV2() external reinitializer(2) {
+        baseTokenDecimals = _readBaseTokenDecimals(baseToken);
+    }
+
+    function _readBaseTokenDecimals(address _baseToken) private view returns (uint8 decimals_) {
+        decimals_ = IERC20Metadata(_baseToken).decimals();
+        require(decimals_ <= 18, "TokenSale: invalid base token decimals");
+    }
+
     // ============ Admin Functions ============
 
     /**
      * @dev Add a payment token with its manual price
      * @param paymentToken Address of the payment token (address(0) for ETH)
-     * @param price How many smallest units of the payment token buy 1 whole base token (10**18 base units)
+     * @param price How many smallest units of the payment token buy 1 whole base token (10**baseTokenDecimals base units)
      * @param paymentTokenDecimals_ Decimals of the payment token (18 for ETH).
      *                        Verified against the token's own decimals() when the token exposes it.
-     *                        Example: If 1 base token (18 decimals) costs 3 USDC (6 decimals)
-     *                        Then price = 3 * 10^6, paymentTokenDecimals_ = 6
-     *                        Calculation: baseTokensOut = (paymentAmount * 10**18) / price
+     *                        Example: If 1 base token costs 3 USDC (6 decimals)
+     *                        Then price = 3 * 10^6, paymentTokenDecimals_ = 6 (independent of base token decimals)
+     *                        Calculation: baseTokensOut = (paymentAmount * 10**baseTokenDecimals) / price
      */
     function addPaymentToken(address paymentToken, uint256 price, uint8 paymentTokenDecimals_)
         external
@@ -353,7 +373,7 @@ contract TokenSale is Initializable, AccessControlUpgradeable, ReentrancyGuardTr
      * @notice Base rate must be set first using setBaseRate()
      * @notice Both payment token and base payment token need oracles (both relative to same quote, e.g., USD)
      * @notice Example setup:
-     *         - setBaseRate(EUR token, 1 * 10^18) // 1 token = 1 EUR
+     *         - setBaseRate(EUR token, 1 * 10**baseTokenDecimals) // 1 token = 1 EUR
      *         - configureOracle(EUR, EUR/USD oracle) // For base payment token
      *         - configureOracle(ETH, ETH/USD oracle) // ETH/USD = 3000, EUR/USD = 1.10
      *         - Result: 1 ETH = 3000/1.10 = 2727.27 tokens
@@ -485,11 +505,11 @@ contract TokenSale is Initializable, AccessControlUpgradeable, ReentrancyGuardTr
     /**
      * @dev Set the base payment token and base rate
      * @notice This is the central rate that all other payment methods derive from
-     * @notice Example: basePaymentToken = EUR token address, baseRate = 1 * 10^18 means "1 token = 1 EUR"
+     * @notice Example: basePaymentToken = EUR token address, baseRate = 1 * 10**baseTokenDecimals means "1 token = 1 EUR"
      * @notice For the base payment token itself: rate is used directly (no oracle needed)
      * @notice For other payment tokens: rates are derived via oracles (e.g., ETH/EUR)
      * @param _basePaymentToken Address of the base payment token (address(0) for ETH, or token address for EUR/USDC etc.)
-     * @param _baseRate Base tokens per base payment token (18 decimals) - e.g., 1 * 10^18 = 1 token per base payment token
+     * @param _baseRate Base token smallest units per 1 whole base payment token - e.g., 1 * 10**baseTokenDecimals = 1 token per base payment token
      */
     function setBaseRate(address _basePaymentToken, uint256 _baseRate) external onlyRole(ADMIN_ROLE) {
         require(_baseRate > 0, "TokenSale: invalid base rate");
@@ -502,7 +522,7 @@ contract TokenSale is Initializable, AccessControlUpgradeable, ReentrancyGuardTr
 
     /**
      * @dev Update the base rate
-     * @param newBaseRate New base rate (base tokens per base payment token, 18 decimals)
+     * @param newBaseRate New base rate (base token smallest units per 1 whole base payment token)
      */
     function updateBaseRate(uint256 newBaseRate) external onlyRole(ADMIN_ROLE) {
         require(newBaseRate > 0, "TokenSale: invalid base rate");
@@ -682,7 +702,7 @@ contract TokenSale is Initializable, AccessControlUpgradeable, ReentrancyGuardTr
      *         = 1 BASE) yield exact results.
      * @param paymentToken Address of the payment token (address(0) for ETH)
      * @param paymentAmount Amount of payment token (with its decimals)
-     * @return baseTokensOut Amount of base tokens (18 decimals) the payment buys
+     * @return baseTokensOut Amount of base tokens (in base token smallest units) the payment buys
      */
     function _quoteBaseTokensOut(address paymentToken, uint256 paymentAmount)
         internal
@@ -703,7 +723,7 @@ contract TokenSale is Initializable, AccessControlUpgradeable, ReentrancyGuardTr
 
         // Manual mode: exact price (payment units per 1 whole base token), single division
         uint256 price = paymentTokenPrices[paymentToken];
-        return (paymentAmount * (10 ** 18)) / price;
+        return (paymentAmount * (10 ** baseTokenDecimals)) / price;
     }
 
     /**
@@ -711,11 +731,11 @@ contract TokenSale is Initializable, AccessControlUpgradeable, ReentrancyGuardTr
      * @notice Derives rate from base rate and base payment token
      * @notice Requires oracles for both paymentToken and basePaymentToken (both relative to USD or same quote currency)
      * @notice Formula: rate = baseRate * (paymentTokenPrice / basePaymentTokenPrice)
-     * @notice Example: basePaymentToken = EUR, baseRate = 1 * 10^18 (1 token = 1 EUR)
+     * @notice Example: basePaymentToken = EUR, 18-decimal base token, baseRate = 1 * 10^18 (1 token = 1 EUR)
      * @notice If ETH/USD = 3000 and EUR/USD = 1.10, then 1 ETH = 3000/1.10 = 2727.27 EUR
      * @notice Result: rate = 1 * 10^18 * (3000 / 1.10) = 2727.27 * 10^18 tokens per ETH
      * @param paymentToken Address of the payment token
-     * @return rate Rate in base tokens (18 decimals) per 1 unit of payment token
+     * @return rate Rate in base token smallest units per 1 whole payment token
      */
     function _getOracleRate(address paymentToken) internal view returns (uint256 rate) {
         _checkSequencerUp();
@@ -1071,7 +1091,7 @@ contract TokenSale is Initializable, AccessControlUpgradeable, ReentrancyGuardTr
      * @notice Reverts if oracle mode is active and the oracle data is unavailable/stale (fail-closed)
      * @param paymentToken Address of the payment token (address(0) for ETH)
      * @param paymentAmount Amount of payment token (with its decimals)
-     * @return baseTokens Amount of base tokens that would be received (with 18 decimals)
+     * @return baseTokens Amount of base tokens that would be received (in base token smallest units)
      */
     function calculateTokens(address paymentToken, uint256 paymentAmount) external view returns (uint256 baseTokens) {
         require(allowedPaymentTokens[paymentToken], "TokenSale: payment token not allowed");

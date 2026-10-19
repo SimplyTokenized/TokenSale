@@ -184,7 +184,7 @@ cast send $TOKEN_SALE_ADDRESS "revokeRole(bytes32,address)" $ROLE <ADDRESS> --pr
 ```bash
 cast send $TOKEN_SALE_ADDRESS "addPaymentToken(address,uint256,uint8)" <TOKEN_ADDRESS> <PRICE> <DECIMALS> --private-key $PRIVATE_KEY --rpc-url $RPC_URL
 ```
-`PRICE` is how many smallest units of the payment token buy 1 whole base token (10^18 base units) — an exact price, not a pre-divided "tokens per payment" rate.
+`PRICE` is how many smallest units of the payment token buy 1 whole base token (10^baseTokenDecimals base units) — an exact price, not a pre-divided "tokens per payment" rate.
 
 **Example (add ETH so 1 ETH = 1000 tokens, 18 decimals):**
 ```bash
@@ -386,6 +386,8 @@ cast send $TOKEN_SALE_ADDRESS "setBaseRate(address,uint256)" <BASE_PAYMENT_TOKEN
 **Example:**
 ```bash
 # Set base payment token to EUR token with rate 1 token = 1 EUR
+# BASE_RATE is in base token smallest units: 10^baseTokenDecimals = 1 whole token (here: 18 decimals)
+cast call $TOKEN_SALE_ADDRESS "baseTokenDecimals()(uint8)" --rpc-url $RPC_URL
 cast send $TOKEN_SALE_ADDRESS "setBaseRate(address,uint256)" <EUR_TOKEN_ADDRESS> 1000000000000000000 --private-key $PRIVATE_KEY --rpc-url $RPC_URL
 ```
 

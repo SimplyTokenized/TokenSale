@@ -81,17 +81,18 @@ npm run deploy:nodejs   # Node.js/ethers deployment path (see DEPLOY_NODEJS.md)
 - `getUserPurchasesByToken(address user, address paymentToken)` — purchases per payment token
 - `totalSales()`, `revenueByToken(address)` — sale-wide statistics
 - `paymentTokenPrices(address)`, `paymentTokenDecimals(address)`, `allowedPaymentTokens(address)` — payment token configuration
+- `baseTokenDecimals()` — decimals of the base token, read from the token at initialization
 - `usedOrderIds(address buyer, bytes32 orderId)` — whether a buyer has used an order ID
 
 ### Admin Functions
 
 #### Payment Token Management
-- `addPaymentToken(address paymentToken, uint256 price, uint8 paymentTokenDecimals)` — add a payment token. `price` is how many smallest units of the payment token buy 1 whole base token (10**18 base units); decimals are verified against the token contract when available; ETH must be added with 18 decimals
+- `addPaymentToken(address paymentToken, uint256 price, uint8 paymentTokenDecimals)` — add a payment token. `price` is how many smallest units of the payment token buy 1 whole base token (10**baseTokenDecimals base units); decimals are verified against the token contract when available; ETH must be added with 18 decimals
 - `removePaymentToken(address paymentToken)` — remove a payment token and **all** of its configuration (price, decimals, oracle settings, price bounds); the active base payment token cannot be removed
 - `updatePaymentTokenPrice(address paymentToken, uint256 newPrice)` — update a manual price
 
 #### Base Rate & Oracle Pricing
-- `setBaseRate(address basePaymentToken, uint256 baseRate)` — set the anchor: how many base tokens one unit of the base payment token buys
+- `setBaseRate(address basePaymentToken, uint256 baseRate)` — set the anchor: how many base token smallest units one whole base payment token buys (e.g. `1 * 10**baseTokenDecimals` = 1 token per base payment token)
 - `updateBaseRate(uint256 newBaseRate)` / `updateBasePaymentToken(address newBasePaymentToken)`
 - `configureOracle(address paymentToken, address oracle, uint256 stalenessThreshold)` — attach a Chainlink feed to a payment token and enable oracle mode; set the threshold to the feed's heartbeat
 - `setOracleMode(address paymentToken, bool useOracle)` — switch between oracle and manual pricing
@@ -144,7 +145,8 @@ baseToken.grantRole(MINTER_ROLE, tokenSaleProxyAddress);
 ### 3. Add Payment Tokens
 
 ```solidity
-// price = smallest units of the payment token that buy 1 whole base token (10**18 base units).
+// price = smallest units of the payment token that buy 1 whole base token (10**baseTokenDecimals base units).
+// The price does not depend on the base token's decimals - only on the payment token's.
 // This is an exact price (not a pre-divided "tokens per payment" rate), so purchases at
 // this price round only once, in the purchase calculation itself.
 
@@ -160,8 +162,9 @@ tokenSale.addPaymentToken(address(0), 10**15, 18);
 All oracle-derived rates are anchored to a base payment token. Every feed must quote against the same currency (e.g. USD):
 
 ```solidity
-// Anchor: 1 token = 1 EUR (EURc is an allowed payment token)
-tokenSale.setBaseRate(eurTokenAddress, 1 * 10**18);
+// Anchor: 1 token = 1 EUR (EURc is an allowed payment token).
+// baseRate is in base token smallest units: 1 * 10**baseTokenDecimals = 1 whole token.
+tokenSale.setBaseRate(eurTokenAddress, 1 * 10**tokenSale.baseTokenDecimals());
 
 // Feeds — thresholds should match each feed's heartbeat
 tokenSale.configureOracle(eurTokenAddress, EUR_USD_FEED, 24 hours);
@@ -204,17 +207,26 @@ See [CAST_COMMANDS.md](./CAST_COMMANDS.md) for the complete `cast` command refer
 
 ## 📊 Rate Calculation
 
-The rate is stored as **base tokens (18 decimals) per 1 whole unit of payment token**:
+All amounts of base tokens are in the base token's smallest units; the base token's decimals (`baseTokenDecimals`, read from the token at initialization) may be anything from 0 to 18.
+
+**Manual price** — smallest payment-token units per 1 whole base token:
 
 ```
-baseTokens = (paymentAmount * rate) / (10^paymentTokenDecimals)
+baseTokens = (paymentAmount * 10^baseTokenDecimals) / price
 ```
 
-**USDC (6 decimals):** rate `100 * 10^18` → paying `1000 * 10^6` yields `(1000e6 * 100e18) / 1e6 = 100,000e18` base tokens.
+- **USDC (6 decimals), 18-decimal base token:** price `10000` (0.01 USDC) → paying `1000e6` yields `(1000e6 * 1e18) / 1e4 = 100,000e18` base tokens.
+- **USDC (6 decimals), 0-decimal base token:** price `3e6` (3 USDC) → paying `30e6` yields `(30e6 * 1) / 3e6 = 10` base tokens.
 
-**ETH (18 decimals):** rate `1000 * 10^18` → paying `1e18` yields `(1e18 * 1000e18) / 1e18 = 1000e18` base tokens.
+**Base payment token** — `baseRate` is base token smallest units per 1 whole base payment token:
 
-In oracle mode the rate is derived instead: `rate = baseRate * paymentTokenPrice / basePaymentTokenPrice`, with both prices normalized to 18 decimals.
+```
+baseTokens = (paymentAmount * baseRate) / 10^paymentTokenDecimals
+```
+
+**Oracle mode** derives the rate instead: `rate = baseRate * paymentTokenPrice / basePaymentTokenPrice`, with both feed prices normalized to 18 decimals, then applies the same formula as the base payment token.
+
+> **Granularity:** a manual price cannot be smaller than 1 smallest unit of the payment token per whole base token. With a low-decimal payment token (e.g. a 2-decimal EUR token) and a cheap base token, use the base rate / oracle path instead.
 
 ## How Oracle Pricing Works (in plain terms)
 
@@ -267,6 +279,7 @@ The contract uses OpenZeppelin's transparent proxy pattern:
 - **State** lives in the proxy and persists across upgrades
 - Reentrancy protection uses transient storage (`ReentrancyGuardTransient`) and OpenZeppelin's other parents use ERC-7201 namespaced storage, minimizing storage-layout risk; new state variables must still only ever be **appended**
 - The test suite runs OpenZeppelin's upgrade-safety validation on every deployment
+- **Upgrading a proxy deployed before `baseTokenDecimals` existed:** call `initializeV2()` in the same transaction (`upgradeAndCall`). Without it `baseTokenDecimals` stays `0` and manual prices are interpreted for a 0-decimal base token
 
 ## ⚠️ Security Considerations
 
@@ -277,7 +290,7 @@ The contract uses OpenZeppelin's transparent proxy pattern:
 - **Slippage Protection** — buyers pass `minTokensOut`; purchases revert if the rate moved against them
 - **Per-User Limits** — enforced against `totalPurchased` (tokens bought through the sale), so they cannot be bypassed by moving tokens to another wallet nor griefed by unsolicited transfers
 - **Order IDs** — scoped per buyer, so a third party cannot front-run and burn someone else's orderId
-- **Input Validation** — payment token decimals verified against the token contract; ETH fixed at 18 decimals
+- **Input Validation** — payment token decimals verified against the token contract; ETH fixed at 18 decimals; base token decimals read from the token itself (max 18)
 - **SafeERC20** everywhere; payments forwarded immediately, the contract holds no funds
 
 ### Operational requirements
